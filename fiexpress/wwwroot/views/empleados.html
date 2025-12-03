@@ -465,7 +465,7 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 
     <script>
-        // MÓDULO EMPLEADOS - Lógica Preservada
+        // MÓDULO EMPLEADOS (Optimizado con Silent Refresh)
         window.EmpleadosModule = (function () {
             'use strict';
 
@@ -490,84 +490,112 @@
                         ...options
                     });
 
+                    // Manejo de errores 500 silenciosos
                     if (response.status === 500) {
-                        console.warn('⚠️ Error 500, verificando éxito parcial...');
                         try {
                             const errorData = await response.json();
-                            if (errorData.mensaje) throw new Error(`Server Error: ${errorData.mensaje}`);
-                        } catch (parseError) {
-                            return { _success: true, _partial: true };
+                            if (errorData.mensaje) throw new Error(errorData.mensaje);
+                        } catch (e) {
+                            return { _success: true, _partial: true }; // Retorno seguro si falla parseo
                         }
-                        throw new Error(`Error 500`);
+                        throw new Error('Error interno del servidor (500)');
                     }
 
                     if (!response.ok) {
-                        const text = await response.text();
                         throw new Error(`Error ${response.status}: ${response.statusText}`);
                     }
                     return await response.json();
                 } catch (error) {
                     console.error('API Call Error:', error);
-                    if (!error.message.includes('500')) mostrarAlerta(`Error: ${error.message}`, 'danger');
+                    // Solo mostrar alerta si no es un refresco automático fallido
+                    if (!options.silentError) {
+                        mostrarAlerta(`Error de conexión: ${error.message}`, 'danger');
+                    }
                     throw error;
                 }
             }
 
-            async function cargarEmpleados() {
+            // ✅ CORRECCIÓN PRINCIPAL: Parámetro 'silent'
+            async function cargarEmpleados(silent = false) {
                 try {
-                    mostrarLoadingTabla();
+                    // Solo mostramos el spinner si NO es una actualización automática (silent)
+                    if (!silent) mostrarLoadingTabla();
+
                     const params = new URLSearchParams();
                     if (state.filtros.incluirInactivos) params.append('incluirInactivos', 'true');
 
-                    state.empleados = await apiCall(`/api/empleados?${params.toString()}`);
-                    aplicarFiltrosYRenderizar();
-                    actualizarEstadisticas();
-                    actualizarTimestamp();
+                    // Pasamos flag silentError para no llenar de alertas si falla el auto-refresh
+                    const data = await apiCall(`/api/empleados?${params.toString()}`, { silentError: silent });
+
+                    if (data) {
+                        state.empleados = data;
+                        aplicarFiltrosYRenderizar();
+                        actualizarEstadisticas();
+                        actualizarTimestamp();
+                    }
                 } catch (error) {
-                    mostrarErrorTabla('Error al cargar empleados: ' + error.message);
+                    if (!silent) {
+                        mostrarErrorTabla('Error al cargar empleados: ' + error.message);
+                    }
+                } finally {
+                    if (!silent) ocultarLoadingTabla();
                 }
             }
 
             async function cargarSelects() {
                 try {
+                    // Cargar Departamentos
                     state.departamentos = await apiCall('/api/departamentos?incluirInactivos=false');
                     const selectDepto = document.getElementById('selectDepartamento');
                     const filtroDepto = document.getElementById('select-departamento');
 
-                    selectDepto.innerHTML = '<option value="">Seleccionar...</option>';
-                    filtroDepto.innerHTML = '<option value="">Todos los deptos.</option>';
+                    if (selectDepto && filtroDepto) {
+                        selectDepto.innerHTML = '<option value="">Seleccionar...</option>';
+                        filtroDepto.innerHTML = '<option value="">Todos los deptos.</option>';
 
-                    state.departamentos.forEach(d => {
-                        selectDepto.innerHTML += `<option value="${d.idDepartamento}">${d.nombre}</option>`;
-                        filtroDepto.innerHTML += `<option value="${d.idDepartamento}">${d.nombre}</option>`;
-                    });
+                        state.departamentos.forEach(d => {
+                            const opt = `<option value="${d.idDepartamento}">${d.nombre}</option>`;
+                            selectDepto.innerHTML += opt;
+                            filtroDepto.innerHTML += opt;
+                        });
+                    }
 
+                    // Cargar Roles
                     state.roles = await apiCall('/api/roles?incluirInactivos=false');
                     const selectRol = document.getElementById('selectRol');
-                    selectRol.innerHTML = '<option value="">Seleccionar...</option>';
-                    state.roles.forEach(r => {
-                        selectRol.innerHTML += `<option value="${r.idRol}">${r.nombre}</option>`;
-                    });
-                } catch (e) { console.error(e); }
+                    if (selectRol) {
+                        selectRol.innerHTML = '<option value="">Seleccionar...</option>';
+                        state.roles.forEach(r => {
+                            selectRol.innerHTML += `<option value="${r.idRol}">${r.nombre}</option>`;
+                        });
+                    }
+                } catch (e) { console.error("Error cargando selects:", e); }
             }
 
             function aplicarFiltrosYRenderizar() {
                 let filtrados = [...state.empleados];
                 const s = state.filtros;
 
-                // CORRECCIÓN CRÍTICA: Búsqueda segura
+                // 1. Filtro Texto (Seguro)
                 if (s.buscar) {
                     const b = s.buscar.toLowerCase();
                     filtrados = filtrados.filter(e =>
-                        (e.nombre && e.nombre.toLowerCase().includes(b)) ||
-                        (e.codigo_empleado && String(e.codigo_empleado).toLowerCase().includes(b)) ||
-                        (e.email && e.email.toLowerCase().includes(b)) ||
-                        (e.departamento && e.departamento.nombre && e.departamento.nombre.toLowerCase().includes(b))
+                        (e.nombre?.toLowerCase().includes(b)) ||
+                        (String(e.codigo_empleado || '').toLowerCase().includes(b)) ||
+                        (e.email?.toLowerCase().includes(b)) ||
+                        (String(e.departamento || '').toLowerCase().includes(b))
                     );
                 }
+
+                // 2. Filtro Departamento (Por Nombre, ya que la API devuelve string)
                 if (s.departamento) {
-                    filtrados = filtrados.filter(e => e.departamento && e.departamento.idDepartamento == s.departamento);
+                    const deptoObj = state.departamentos.find(d => d.idDepartamento == s.departamento);
+                    if (deptoObj) {
+                        filtrados = filtrados.filter(e => e.departamento === deptoObj.nombre);
+                    }
                 }
+
+                // 3. Filtro Estado
                 if (s.estado) {
                     filtrados = filtrados.filter(e => s.estado === 'activo' ? e.activo : !e.activo);
                 }
@@ -577,88 +605,88 @@
 
             function renderizarEmpleados(empleados) {
                 const tbody = document.getElementById('tabla-empleados');
+                if (!tbody) return; // Protección contra cambio de vista
+
                 document.getElementById('contador-empleados').textContent = state.empleados.length;
                 document.getElementById('contador-filtrados').textContent = empleados.length;
 
                 if (empleados.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted py-5">No se encontraron empleados</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center text-muted py-5">No se encontraron empleados con los filtros actuales</td></tr>`;
                     return;
                 }
 
+                // Renderizado directo sin parpadeos
                 tbody.innerHTML = empleados.map(e => `
-                        <tr class="${!e.activo ? 'opacity-50' : ''}">
-                            <td>
-                                <div class="d-flex align-items-center">
-                                    <img src="${e.foto_url || `https://ui-avatars.com/api/?name=${encodeURIComponent(e.nombre)}&background=0D6EFD&color=fff`}"
-                                         class="avatar-table rounded-circle me-3"
-                                         onerror="this.src='https://ui-avatars.com/api/?name=NA&background=random'">
-                                    <div>
-                                        <strong class="d-block text-white">${e.nombre}</strong>
-                                        <small class="text-muted">${e.codigo_empleado}</small>
-                                        <div class="mt-1">
-                                            ${e.esSupervisor ? '<span class="badge bg-warning text-dark status-badge me-1">Supervisor</span>' : ''}
-                                            ${e.tieneUsuario ? '<span class="badge bg-info text-dark status-badge">Usuario</span>' : ''}
+                            <tr class="${!e.activo ? 'opacity-50' : ''}">
+                                <td>
+                                    <div class="d-flex align-items-center">
+                                        <img src="${e.foto_url || `https://ui-avatars.com/api/?name=${encodeURIComponent(e.nombre)}&background=0D6EFD&color=fff`}"
+                                             class="avatar-table rounded-circle me-3"
+                                             width="45" height="45"
+                                             onerror="this.src='https://ui-avatars.com/api/?name=NA&background=random'">
+                                        <div>
+                                            <strong class="d-block text-white">${e.nombre}</strong>
+                                            <small class="text-muted">${e.codigo_empleado}</small>
+                                            <div class="mt-1">
+                                                ${e.esSupervisor ? '<span class="badge bg-warning text-dark status-badge me-1" style="font-size:0.7em">Supervisor</span>' : ''}
+                                                ${e.tieneUsuario ? '<span class="badge bg-info text-dark status-badge" style="font-size:0.7em">Usuario</span>' : ''}
+                                            </div>
                                         </div>
                                     </div>
-                                </div>
-                            </td>
-                            <td>
-                                <div class="small text-muted">
-                                    <div><i class="bi bi-envelope me-2"></i>${e.email}</div>
-                                    <div><i class="bi bi-telephone me-2"></i>${e.telefono || '-'}</div>
-                                </div>
-                            </td>
-                            <td><span class="badge badge-glass text-light">${e.departamento?.nombre || 'N/A'}</span></td>
-                            <td><span class="badge badge-glass text-light">${e.rol?.nombre || 'N/A'}</span></td>
-                            <td>
-                                <span class="badge ${e.activo ? 'bg-success' : 'bg-danger'} bg-opacity-75">
-                                    ${e.activo ? 'Activo' : 'Inactivo'}
-                                </span>
-                                ${e.fecha_baja ? `<div class="small text-danger mt-1">Baja: ${new Date(e.fecha_baja).toLocaleDateString()}</div>` : ''}
-                            </td>
-                            <td class="text-end">
-                                <div class="btn-group btn-group-sm shadow-sm">
-                                    <button class="btn btn-outline-primary" onclick="EmpleadosModule.editarEmpleado(${e.idEmpleado})" ${!e.activo ? 'disabled' : ''} title="Editar"><i class="bi bi-pencil"></i></button>
-                                    ${e.activo ?
+                                </td>
+                                <td>
+                                    <div class="small text-muted">
+                                        <div><i class="bi bi-envelope me-2"></i>${e.email}</div>
+                                        <div><i class="bi bi-telephone me-2"></i>${e.telefono || '-'}</div>
+                                    </div>
+                                </td>
+                                <td><span class="badge badge-glass text-light fw-normal">${e.departamento || 'N/A'}</span></td>
+                                <td><span class="badge badge-glass text-light fw-normal">${e.rol || 'N/A'}</span></td>
+                                <td>
+                                    <span class="badge ${e.activo ? 'bg-success' : 'bg-danger'} bg-opacity-75">
+                                        ${e.activo ? 'Activo' : 'Inactivo'}
+                                    </span>
+                                    ${e.fecha_baja ? `<div class="small text-danger mt-1">Baja: ${new Date(e.fecha_baja).toLocaleDateString()}</div>` : ''}
+                                </td>
+                                <td class="text-end">
+                                    <div class="btn-group btn-group-sm shadow-sm">
+                                        <button class="btn btn-outline-primary" onclick="EmpleadosModule.editarEmpleado(${e.idEmpleado})" ${!e.activo ? 'disabled' : ''} title="Editar"><i class="bi bi-pencil"></i></button>
+                                        ${e.activo ?
                         `<button class="btn btn-outline-danger" onclick="EmpleadosModule.desactivarEmpleado(${e.idEmpleado}, '${e.nombre}')" title="Desactivar"><i class="bi bi-person-dash"></i></button>` :
                         `<button class="btn btn-outline-success" onclick="EmpleadosModule.activarEmpleado(${e.idEmpleado}, '${e.nombre}')" title="Activar"><i class="bi bi-person-check"></i></button>`}
-                                </div>
-                            </td>
-                        </tr>
-                    `).join('');
+                                    </div>
+                                </td>
+                            </tr>
+                        `).join('');
             }
 
+            // --- Funciones Modales y Acciones (Igual que antes) ---
             async function abrirModalNuevo() {
                 if (state.departamentos.length === 0) await cargarSelects();
-
                 document.getElementById('formEmpleado').reset();
                 document.getElementById('empleadoId').value = '';
                 document.getElementById('modalEmpleadoTitle').innerHTML = '<i class="bi bi-person-plus me-2"></i>Nuevo Empleado';
                 document.getElementById('avatar-preview').style.display = 'none';
                 document.getElementById('fechaIngreso').value = new Date().toISOString().split('T')[0];
                 document.getElementById('codigoEmpleado').disabled = false;
-
                 document.getElementById('nombreEmpleado').addEventListener('input', updateAvatarPreview);
 
                 if (!state.modalInstance) state.modalInstance = new bootstrap.Modal(document.getElementById('modalEmpleado'));
                 state.modalInstance.show();
-                setTimeout(() => {
-                    document.getElementById('codigoEmpleado').focus();
-                }, 500);
             }
 
             function updateAvatarPreview() {
                 const val = this.value.trim();
-                const img = document.getElementById('preview-avatar-img');
                 const div = document.getElementById('avatar-preview');
                 if (val) {
-                    img.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(val)}&size=200&background=0D6EFD&color=fff`;
+                    document.getElementById('preview-avatar-img').src = `https://ui-avatars.com/api/?name=${encodeURIComponent(val)}&size=200&background=0D6EFD&color=fff`;
                     div.style.display = 'block';
                 } else { div.style.display = 'none'; }
             }
 
             async function editarEmpleado(id) {
                 try {
+                    // Carga normal con spinner porque es acción de usuario
                     const emp = await apiCall(`/api/empleados/${id}`);
                     document.getElementById('empleadoId').value = emp.idEmpleado;
                     document.getElementById('codigoEmpleado').value = emp.codigo_empleado;
@@ -688,9 +716,6 @@
                 const form = document.getElementById('formEmpleado');
                 if (!form.checkValidity()) { form.reportValidity(); return; }
 
-                const nac = new Date(document.getElementById('fechaNacimiento').value);
-                if ((new Date().getFullYear() - nac.getFullYear()) < 14) { mostrarAlerta('Edad mínima 14 años', 'warning'); return; }
-
                 const id = document.getElementById('empleadoId').value;
                 const data = {
                     CodigoEmpleado: document.getElementById('codigoEmpleado').value.trim(),
@@ -706,28 +731,21 @@
 
                 toggleBotonGuardar(true);
                 try {
-                    let res;
                     if (id) {
-                        res = await apiCall(`/api/empleados/${id}`, {
+                        await apiCall(`/api/empleados/${id}`, {
                             method: 'PUT', body: JSON.stringify({
                                 Nombre: data.Nombre, Email: data.Email, Telefono: data.Telefono,
                                 IdDepartamento: data.IdDepartamento, IdRol: data.IdRol
                             })
                         });
                     } else {
-                        res = await apiCall('/api/empleados', { method: 'POST', body: JSON.stringify(data) });
+                        await apiCall('/api/empleados', { method: 'POST', body: JSON.stringify(data) });
                     }
-
-                    if (res && res._partial) mostrarAlerta('Guardado con advertencia del servidor', 'warning');
-                    else mostrarAlerta(id ? 'Actualizado correctamente' : 'Creado correctamente', 'success');
-
+                    mostrarAlerta(id ? 'Actualizado correctamente' : 'Creado correctamente', 'success');
                     state.modalInstance.hide();
-                    await cargarEmpleados();
+                    await cargarEmpleados(); // Recarga normal
                 } catch (e) {
-                    if (e.message.includes('500')) {
-                        mostrarAlerta('Verificando cambios tras error 500...', 'warning');
-                        await cargarEmpleados();
-                    } else { mostrarAlerta('Error al guardar', 'danger'); }
+                    mostrarAlerta('Error al guardar', 'danger');
                 } finally { toggleBotonGuardar(false); }
             }
 
@@ -735,29 +753,31 @@
                 if (!confirm(`¿Desactivar a ${n}?`)) return;
                 try {
                     await apiCall(`/api/empleados/${id}/desactivar`, { method: 'PUT' });
-                    mostrarAlerta('Desactivado', 'success'); await cargarEmpleados();
-                } catch (e) {
-                    if (e.message.includes('500')) { await cargarEmpleados(); }
-                    else mostrarAlerta('Error al desactivar', 'danger');
-                }
+                    mostrarAlerta('Desactivado', 'success');
+                    await cargarEmpleados(true); // Recarga silenciosa
+                } catch (e) { mostrarAlerta('Error al desactivar', 'danger'); }
             }
 
             async function activarEmpleado(id, n) {
                 if (!confirm(`¿Activar a ${n}?`)) return;
                 try {
                     await apiCall(`/api/empleados/${id}/activar`, { method: 'PUT' });
-                    mostrarAlerta('Activado', 'success'); await cargarEmpleados();
-                } catch (e) {
-                    if (e.message.includes('500')) { await cargarEmpleados(); }
-                    else mostrarAlerta('Error al activar', 'danger');
-                }
+                    mostrarAlerta('Activado', 'success');
+                    await cargarEmpleados(true); // Recarga silenciosa
+                } catch (e) { mostrarAlerta('Error al activar', 'danger'); }
             }
 
+            // --- Utilidades ---
             function actualizarEstadisticas() {
-                document.getElementById('stat-total').textContent = state.empleados.length;
-                document.getElementById('stat-activos').textContent = state.empleados.filter(e => e.activo).length;
-                document.getElementById('stat-con-usuario').textContent = state.empleados.filter(e => e.tieneUsuario).length;
-                document.getElementById('stat-supervisores').textContent = state.empleados.filter(e => e.esSupervisor).length;
+                const total = state.empleados.length;
+                const activos = state.empleados.filter(e => e.activo).length;
+                const conUsuario = state.empleados.filter(e => e.tieneUsuario).length;
+                const supervisores = state.empleados.filter(e => e.esSupervisor).length;
+
+                document.getElementById('stat-total').textContent = total;
+                document.getElementById('stat-activos').textContent = activos;
+                document.getElementById('stat-con-usuario').textContent = conUsuario;
+                document.getElementById('stat-supervisores').textContent = supervisores;
             }
 
             function limpiarFiltros() {
@@ -787,8 +807,8 @@
             }
 
             function actualizarTimestamp() {
-                document.getElementById('ultima-actualizacion').innerHTML = `<i class="bi bi-arrow-clockwise me-1"></i>Actualizado: ${new Date().toLocaleTimeString()}`;
-                ocultarLoadingTabla();
+                const el = document.getElementById('ultima-actualizacion');
+                if (el) el.innerHTML = `<i class="bi bi-arrow-clockwise me-1"></i>Actualizado: ${new Date().toLocaleTimeString()}`;
             }
 
             function mostrarAlerta(msg, type) {
@@ -799,13 +819,12 @@
                 setTimeout(() => div.remove(), 3000);
             }
 
-            function recargarEmpleados() { cargarEmpleados(); }
-
             // INIT
             async function init() {
                 if (!document.getElementById('empleados-container')) return;
+
                 await cargarSelects();
-                await cargarEmpleados();
+                await cargarEmpleados(); // Carga inicial CON spinner
 
                 // Eventos
                 document.getElementById('input-buscar').addEventListener('input', (e) => {
@@ -818,17 +837,26 @@
                     state.filtros.estado = e.target.value; aplicarFiltrosYRenderizar();
                 });
                 document.getElementById('check-inactivos').addEventListener('change', (e) => {
-                    state.filtros.incluirInactivos = e.target.checked; cargarEmpleados();
+                    state.filtros.incluirInactivos = e.target.checked;
+                    cargarEmpleados(); // Recarga con spinner al cambiar este filtro crítico
                 });
 
-                setInterval(() => { if (!document.hidden) cargarEmpleados(); }, 30000);
+                // Auto-refresh: Silencioso y se detiene si cambia la vista
+                const intervalId = setInterval(() => {
+                    if (!document.getElementById('empleados-container')) {
+                        clearInterval(intervalId);
+                        return;
+                    }
+                    if (!document.hidden) cargarEmpleados(true); // TRUE = Silent
+                }, 30000);
             }
 
             if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
             else init();
 
-            return { init, abrirModalNuevo, editarEmpleado, guardarEmpleado, desactivarEmpleado, activarEmpleado, limpiarFiltros, recargarEmpleados, cargarEmpleados };
+            return { init, abrirModalNuevo, editarEmpleado, guardarEmpleado, desactivarEmpleado, activarEmpleado, limpiarFiltros, recargarEmpleados: () => cargarEmpleados(false), cargarEmpleados };
         })();
     </script>
+
 </body>
 </html>

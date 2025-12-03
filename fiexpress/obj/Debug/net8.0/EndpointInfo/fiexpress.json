@@ -452,6 +452,14 @@
               "type": "integer",
               "format": "int32"
             }
+          },
+          {
+            "name": "forzarProcesamiento",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
           }
         ],
         "responses": {
@@ -465,6 +473,16 @@
       "get": {
         "tags": [
           "Estadisticas"
+        ],
+        "parameters": [
+          {
+            "name": "forzarRecalculo",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
         ],
         "responses": {
           "200": {
@@ -491,6 +509,14 @@
             "in": "query",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "forzarProcesamiento",
+            "in": "query",
+            "schema": {
+              "type": "boolean",
+              "default": false
             }
           }
         ],

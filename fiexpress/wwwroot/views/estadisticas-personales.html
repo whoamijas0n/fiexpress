@@ -576,7 +576,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
     <script>
-        // MÓDULO ESTADÍSTICAS PERSONALES - Lógica Refinada
+        // MÓDULO ESTADÍSTICAS PERSONALES - Optimizado y Blindado
         window.EstadisticasPersonales = (function () {
             'use strict';
 
@@ -585,343 +585,417 @@
                 graficos: {},
                 metricaGraficoActual: 'horas',
                 intervalos: [],
-                pasosCarga: ["Iniciando...", "Filtros...", "Cargando...", "Métricas...", "Gráficos...", "Detalle...", "Listo!"],
-                pasoActual: 0
+                pasosCarga: ["Iniciando...", "Validando filtros...", "Consultando historial...", "Calculando métricas...", "Generando gráficos...", "Renderizando...", "¡Listo!"]
             };
 
-            const STORAGE_KEY = 'fiExpress_estadisticas_data';
+            const STORAGE_KEY = 'fiExpress_mis_estadisticas_data';
 
-            // --- PANTALLA CARGA (CORREGIDA: Unidireccional) ---
+            // --- GESTIÓN DE PANTALLA DE CARGA ---
             function actualizarProgresoCarga(paso, msg = null) {
                 const bar = document.getElementById('loading-progress-bar');
                 const txt = document.getElementById('loading-steps');
-                const prog = ((paso + 1) / state.pasosCarga.length) * 100;
+                const prog = Math.min(((paso + 1) / state.pasosCarga.length) * 100, 100);
+
                 if (bar) bar.style.width = `${prog}%`;
-                if (txt) txt.textContent = msg || state.pasosCarga[paso];
-                state.pasoActual = paso;
+                if (txt) {
+                    txt.textContent = msg || state.pasosCarga[paso] || "Procesando...";
+                    if (msg && msg.includes("Error")) txt.style.color = "#ef4444";
+                }
             }
 
             function mostrarPantallaCarga() {
-                // Solo mostrar si está oculta para evitar parpadeos
                 const overlay = document.getElementById('loading-overlay');
-                if (overlay.classList.contains('hidden')) {
+                const content = document.getElementById('estadisticas-personales-container');
+
+                if (overlay) {
                     overlay.classList.remove('hidden');
-                    document.getElementById('estadisticas-personales-container').classList.remove('content-visible');
-                    document.getElementById('estadisticas-personales-container').classList.add('content-hidden');
-                    actualizarProgresoCarga(0);
+                    overlay.style.opacity = "1";
+                    overlay.style.visibility = "visible";
                 }
+                if (content) content.classList.add('content-hidden');
+                actualizarProgresoCarga(0);
             }
 
             function ocultarPantallaCarga() {
                 const overlay = document.getElementById('loading-overlay');
                 const content = document.getElementById('estadisticas-personales-container');
 
-                actualizarProgresoCarga(state.pasosCarga.length - 1, "¡Listo!");
+                actualizarProgresoCarga(6, "¡Listo!");
 
                 setTimeout(() => {
-                    overlay.classList.add('hidden');
-                    content.classList.remove('content-hidden');
-                    content.classList.add('content-visible');
+                    if (overlay) {
+                        overlay.style.opacity = "0";
+                        overlay.classList.add('hidden');
+                        setTimeout(() => { overlay.style.visibility = "hidden"; }, 500);
+                    }
+                    if (content) {
+                        content.classList.remove('content-hidden');
+                        content.classList.add('content-visible');
+                    }
                 }, 500);
             }
 
-            // --- UI HELPERS ---
             function toggleBotones(loading) {
-                const btnRefresh = document.getElementById('btn-refresh');
-                const btnAplicar = document.getElementById('btn-aplicar');
+                const btn = document.getElementById('btn-aplicar');
+                const refresh = document.getElementById('btn-refresh');
+                if (btn) btn.disabled = loading;
+                if (refresh) refresh.disabled = loading;
+            }
 
-                if (btnRefresh) btnRefresh.disabled = loading;
-                if (btnAplicar) {
-                    btnAplicar.disabled = loading;
-                    btnAplicar.innerHTML = loading ?
-                        '<span class="spinner-border spinner-border-sm me-1"></span> Cargando...' :
-                        '<i class="bi bi-filter me-1"></i> Aplicar';
+            function mostrarNotificacion(msg, type) {
+                const div = document.createElement('div');
+                div.className = `alert alert-${type} position-fixed top-0 start-50 translate-middle-x mt-3 z-3 shadow`;
+                div.style.minWidth = "300px";
+                div.innerHTML = `<i class="bi bi-info-circle me-2"></i>${msg}`;
+                document.body.appendChild(div);
+                setTimeout(() => div.remove(), 4000);
+            }
+
+            // --- API SEGURA ---
+            async function apiCall(url, options = {}) {
+                try {
+                    const res = await fetch(url, {
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', ...options.headers },
+                        ...options
+                    });
+
+                    if (!res.ok) {
+                        console.error("API Status:", res.status);
+                        throw new Error(`Error del servidor (${res.status})`);
+                    }
+                    return await res.json();
+                } catch (e) {
+                    throw e; // Propagar para manejar en el caller
                 }
             }
 
             // --- STORAGE ---
-            function guardarDatosEnStorage(datos) {
+            function guardarDatosEnStorage(datos, inicio, fin) {
                 try {
-                    const obj = {
-                        ...datos, timestamp: Date.now(),
-                        filtros: {
-                            inicio: document.getElementById('filtro-inicio').value,
-                            fin: document.getElementById('filtro-fin').value
-                        }
+                    const cacheData = {
+                        data: datos,
+                        timestamp: Date.now(),
+                        filtros: { inicio, fin }
                     };
-                    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
-                } catch (e) { }
+                    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(cacheData));
+                } catch (e) { console.warn("Cache full"); }
             }
 
-            function cargarDatosDesdeStorage() {
+            function cargarDatosDesdeStorage(inicio, fin) {
                 try {
                     const raw = sessionStorage.getItem(STORAGE_KEY);
                     if (!raw) return null;
-                    const data = JSON.parse(raw);
+                    const cache = JSON.parse(raw);
 
-                    const i = document.getElementById('filtro-inicio').value;
-                    const f = document.getElementById('filtro-fin').value;
-
-                    // 5 minutos de caché y mismos filtros
-                    if (Date.now() - data.timestamp > 300000 ||
-                        (data.filtros && (data.filtros.inicio !== i || data.filtros.fin !== f))) {
-                        sessionStorage.removeItem(STORAGE_KEY); return null;
+                    // Cache válido por 5 min si las fechas coinciden
+                    if (Date.now() - cache.timestamp < 300000 &&
+                        cache.filtros.inicio === inicio &&
+                        cache.filtros.fin === fin) {
+                        return cache.data;
                     }
-                    return data;
+                    return null;
                 } catch (e) { return null; }
             }
 
-            // --- API ---
-            async function apiCall(url, options = {}) {
-                try {
-                    const res = await fetch(url, { credentials: 'include', headers: { 'Content-Type': 'application/json', ...options.headers }, ...options });
-                    if (!res.ok) throw new Error(`Error ${res.status}`);
-                    return await res.json();
-                } catch (e) {
-                    console.error('API Error:', e);
-                    mostrarNotificacion(`Error: ${e.message}`, 'danger');
-                    return null;
-                }
-            }
-
+            // --- CORE LOGIC ---
             function inicializarFechas() {
                 const hoy = new Date();
                 const hace30 = new Date();
                 hace30.setDate(hoy.getDate() - 30);
-                document.getElementById('filtro-inicio').value = hace30.toISOString().split('T')[0];
-                document.getElementById('filtro-fin').value = hoy.toISOString().split('T')[0];
+
+                // Si ya hay valores no los sobrescribas
+                if (!document.getElementById('filtro-inicio').value) {
+                    document.getElementById('filtro-inicio').value = hace30.toISOString().split('T')[0];
+                }
+                if (!document.getElementById('filtro-fin').value) {
+                    document.getElementById('filtro-fin').value = hoy.toISOString().split('T')[0];
+                }
             }
 
-            // --- CARGAR DATOS ---
             async function cargarEstadisticas(forceRefresh = false) {
                 const ini = document.getElementById('filtro-inicio').value;
                 const fin = document.getElementById('filtro-fin').value;
 
-                if (!ini || !fin) { mostrarNotificacion('Fechas inválidas', 'warning'); return; }
-
-                toggleBotones(true);
-
-                // 1. Intentar caché si no es forzado
-                if (!forceRefresh) {
-                    const cached = cargarDatosDesdeStorage();
-                    if (cached) {
-                        state.datos = cached;
-                        actualizarVistaCompleta();
-                        // Asegurar que el overlay se oculte si estaba visible (arranque)
-                        setTimeout(ocultarPantallaCarga, 300);
-                        toggleBotones(false);
-                        return;
-                    }
-                }
-
-                // 2. Carga desde API (solo aquí mostramos pantalla completa si es inicial)
-                // Si es refresh por botón, usamos el estado de carga del botón, no overlay completo
-                if (document.getElementById('loading-overlay').classList.contains('hidden') && !forceRefresh) {
-                    // Si ya cargó una vez, no bloquear toda la pantalla, solo botones
-                } else {
-                    mostrarPantallaCarga();
-                }
-
-                actualizarProgresoCarga(1, "Consultando...");
-
-                const datos = await apiCall(`/api/estadisticas/mis-estadisticas-detalladas?inicio=${ini}&fin=${fin}`);
-
-                if (!datos) {
-                    ocultarPantallaCarga();
-                    toggleBotones(false);
+                if (!ini || !fin) {
+                    mostrarNotificacion('Seleccione fechas válidas', 'warning');
                     return;
                 }
 
-                state.datos = datos;
-                guardarDatosEnStorage(datos);
+                try {
+                    toggleBotones(true);
 
-                actualizarProgresoCarga(3, "Procesando...");
-                actualizarVistaCompleta();
+                    // 1. Verificar Caché (si no es forzado)
+                    if (!forceRefresh) {
+                        const cached = cargarDatosDesdeStorage(ini, fin);
+                        if (cached) {
+                            console.log("Cargando desde caché...");
+                            state.datos = cached;
+                            actualizarVistaCompleta();
+                            ocultarPantallaCarga(); // Asegurar ocultar si viene de init
+                            toggleBotones(false);
+                            return;
+                        }
+                    }
 
-                if (forceRefresh) mostrarNotificacion('Estadísticas actualizadas', 'success');
+                    // 2. Carga desde API
+                    // Si no se está mostrando overlay ya, mostramos barra de progreso en botón o overlay
+                    if (document.getElementById('loading-overlay').classList.contains('hidden') && !forceRefresh) {
+                        // Carga silenciosa o inicial
+                    } else {
+                        mostrarPantallaCarga();
+                    }
 
-                ocultarPantallaCarga();
-                toggleBotones(false);
+                    actualizarProgresoCarga(2, forceRefresh ? "Recalculando..." : "Consultando...");
+
+                    // Flag para backend
+                    let url = `/api/estadisticas/mis-estadisticas-detalladas?inicio=${ini}&fin=${fin}`;
+                    if (forceRefresh) url += `&forzarProcesamiento=true`;
+
+                    const datos = await apiCall(url);
+
+                    if (!datos) throw new Error("Datos vacíos recibidos");
+
+                    state.datos = datos;
+                    guardarDatosEnStorage(datos, ini, fin);
+
+                    actualizarProgresoCarga(4, "Renderizando...");
+
+                    // Renderizado en frame seguro
+                    requestAnimationFrame(() => {
+                        actualizarVistaCompleta();
+                        if (forceRefresh) mostrarNotificacion('Datos actualizados correctamente', 'success');
+                    });
+
+                } catch (e) {
+                    console.error("Error crítico:", e);
+                    mostrarNotificacion(`Error: ${e.message}`, 'danger');
+                    actualizarProgresoCarga(6, "Error");
+                } finally {
+                    // 3. SIEMPRE ocultar carga
+                    ocultarPantallaCarga();
+                    toggleBotones(false);
+                }
             }
 
             function actualizarVistaCompleta() {
-                actualizarResumenGeneral();
-                actualizarMetricasAvanzadas();
-                actualizarDetalleDiario();
-                actualizarGraficos();
-                actualizarTimestamp();
+                if (!state.datos) return;
+                try {
+                    actualizarResumenGeneral();
+                    actualizarMetricasAvanzadas();
+                    actualizarDetalleDiario();
+                    actualizarGraficos();
+                    actualizarTimestamp();
+                } catch (e) {
+                    console.error("Error renderizando:", e);
+                    mostrarNotificacion("Error visualizando algunos datos", "warning");
+                }
             }
 
+            // --- RENDERIZADO COMPONENTES ---
+            function setTxt(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; }
+
             function actualizarResumenGeneral() {
-                const r = state.datos.resumen;
-                if (!r) return;
-                document.getElementById('stat-asistencia-total').textContent = r.porcentajeAsistencia + '%';
-                document.getElementById('barra-asistencia').style.width = r.porcentajeAsistencia + '%';
-                document.getElementById('stat-dias-asistencia').textContent = `${r.diasTrabajados}/${r.totalDias} días`;
+                const r = state.datos.resumen || {};
+                setTxt('stat-asistencia-total', (r.porcentajeAsistencia || 0) + '%');
+                const bar = document.getElementById('barra-asistencia');
+                if (bar) bar.style.width = (r.porcentajeAsistencia || 0) + '%';
 
-                document.getElementById('stat-horas-totales').textContent = r.totalHorasTrabajadas + 'h';
+                setTxt('stat-dias-asistencia', `${r.diasTrabajados || 0}/${r.totalDias || 0} días`);
+                setTxt('stat-horas-totales', (r.totalHorasTrabajadas || 0) + 'h');
+
                 const prom = r.totalDias > 0 ? (r.totalHorasTrabajadas / r.totalDias).toFixed(1) : 0;
-                document.getElementById('stat-promedio-diario').textContent = prom + 'h/día';
+                setTxt('stat-promedio-diario', prom + 'h/día');
 
-                document.getElementById('stat-retraso-total').textContent = r.totalMinutosRetraso + 'm';
-                const promR = r.totalDias > 0 ? (r.totalMinutosRetraso / r.totalDias).toFixed(0) : 0;
-                document.getElementById('stat-promedio-retraso').textContent = promR + 'm/día';
-
-                document.getElementById('stat-extra-total').textContent = r.totalMinutosExtra + 'm';
-                const promE = r.totalDias > 0 ? (r.totalMinutosExtra / r.totalDias).toFixed(0) : 0;
-                document.getElementById('stat-promedio-extra').textContent = promE + 'm/día';
+                setTxt('stat-retraso-total', (r.totalMinutosRetraso || 0) + 'm');
+                setTxt('stat-extra-total', (r.totalMinutosExtra || 0) + 'm');
             }
 
             function actualizarMetricasAvanzadas() {
                 const m = state.datos.metricasAvanzadas;
                 if (!m) return;
-                document.getElementById('metric-jornada-promedio').textContent = m.jornadaPromedio;
-                document.getElementById('metric-eficiencia').textContent = m.eficiencia + '%';
-                document.getElementById('metric-consistencia').textContent = m.consistencia + '%';
+                setTxt('metric-jornada-promedio', m.jornadaPromedio);
+                setTxt('metric-eficiencia', m.eficiencia + '%');
+                setTxt('metric-consistencia', m.consistencia + '%');
+
                 const t = document.getElementById('metric-tendencia');
-                t.textContent = m.tendencia;
-                t.className = `mb-0 tendencia-${m.tendencia}`;
+                if (t) {
+                    t.textContent = m.tendencia;
+                    t.className = `mb-0 fw-bold tendencia-${m.tendencia}`;
+                }
             }
 
             function actualizarDetalleDiario() {
                 const tbody = document.getElementById('tabla-detalle-diario');
-                const d = state.datos.detallePorDia;
-                document.getElementById('contador-dias').textContent = d ? d.length : 0;
+                if (!tbody) return;
 
-                if (!d || d.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="3" class="text-center text-muted py-4">Sin datos para mostrar</td></tr>`;
+                const d = state.datos.detallePorDia || [];
+
+                if (d.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="3" class="text-center text-muted py-4">Sin datos en este rango</td></tr>`;
                     return;
                 }
 
-                tbody.innerHTML = d.map(dia => {
-                    let cls = 'bg-secondary';
-                    let icon = 'bi-dash-circle';
+                // Límite de renderizado para no colgar el navegador si son muchos días
+                const displayData = d.slice(0, 100);
+
+                tbody.innerHTML = displayData.map(dia => {
+                    let cls = 'bg-secondary', icon = 'bi-dash-circle';
                     switch (dia.estado_dia) {
                         case 'NORMAL': cls = 'bg-success'; icon = 'bi-check-circle'; break;
                         case 'RETRASO_LEVE': cls = 'bg-warning text-dark'; icon = 'bi-clock-history'; break;
                         case 'RETRASO_GRAVE': cls = 'bg-danger'; icon = 'bi-exclamation-triangle'; break;
                         case 'EXTRA_NORMAL': cls = 'bg-info text-dark'; icon = 'bi-plus-circle'; break;
                         case 'EXTRA_ALTO': cls = 'bg-primary'; icon = 'bi-lightning-charge'; break;
+                        case 'AUSENTE': cls = 'bg-dark border border-secondary'; icon = 'bi-x-circle'; break;
                     }
+
+                    // Formateo seguro de fecha
+                    let fechaStr = dia.fecha;
+                    try { fechaStr = new Date(dia.fecha + 'T00:00:00').toLocaleDateString(); } catch (e) { }
+
                     return `
-                            <tr>
-                                <td class="align-middle">
-                                    <strong>${new Date(dia.fecha).toLocaleDateString()}</strong>
-                                </td>
-                                <td class="align-middle">
-                                    <span class="fw-bold text-white">${dia.horasTrabajadas}</span>
-                                </td>
-                                <td class="align-middle">
-                                    <span class="badge ${cls}"><i class="bi ${icon} me-1"></i>${dia.estado_dia}</span>
-                                </td>
-                            </tr>
-                        `;
+                        <tr>
+                            <td class="align-middle"><strong>${fechaStr}</strong></td>
+                            <td class="align-middle"><span class="fw-bold text-white">${dia.horasTrabajadas}</span></td>
+                            <td class="align-middle"><span class="badge ${cls}"><i class="bi ${icon} me-1"></i>${dia.estado_dia}</span></td>
+                        </tr>`;
                 }).join('');
+
+                if (d.length > 100) {
+                    tbody.innerHTML += `<tr><td colspan="3" class="text-center text-muted small">Mostrando últimos 100 días...</td></tr>`;
+                }
             }
 
             function actualizarGraficos() {
                 const g = state.datos.datosGraficos;
                 if (!g) return;
-                crearGraficoTendencias(g.tendenciasSemanales);
-                crearGraficoProgreso(g.progresoDiario);
-                crearGraficoDistribucion(g.distribucionEstados);
+                // Usamos try-catch interno por si Chart.js falla
+                try {
+                    crearGraficoTendencias(g.tendenciasSemanales || []);
+                    crearGraficoProgreso(g.progresoDiario || []);
+                    crearGraficoDistribucion(g.distribucionEstados || []);
+                } catch (e) { console.warn("Error renderizando gráficos", e); }
             }
 
             function crearGraficoTendencias(data) {
-                const ctx = document.getElementById('grafico-tendencias').getContext('2d');
+                const canvas = document.getElementById('grafico-tendencias');
+                if (!canvas) return;
+
                 if (state.graficos.tendencias) state.graficos.tendencias.destroy();
 
-                state.graficos.tendencias = new Chart(ctx, {
+                state.graficos.tendencias = new Chart(canvas.getContext('2d'), {
                     type: 'line',
                     data: {
                         labels: data.map(t => t.semana),
                         datasets: [{
-                            label: state.metricaGraficoActual,
+                            label: state.metricaGraficoActual.toUpperCase(),
                             data: data.map(t => t[state.metricaGraficoActual]),
-                            borderColor: '#0d6efd', backgroundColor: 'rgba(13, 110, 253, 0.1)', fill: true, tension: 0.4
+                            borderColor: '#0d6efd',
+                            backgroundColor: 'rgba(13, 110, 253, 0.1)',
+                            fill: true,
+                            tension: 0.4
                         }]
                     },
-                    options: { responsive: true, plugins: { legend: { display: false } } }
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: { y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.05)' } }, x: { grid: { display: false } } }
+                    }
                 });
             }
 
             function crearGraficoProgreso(data) {
-                const ctx = document.getElementById('grafico-progreso').getContext('2d');
+                const canvas = document.getElementById('grafico-progreso');
+                if (!canvas) return;
                 if (state.graficos.progreso) state.graficos.progreso.destroy();
 
-                state.graficos.progreso = new Chart(ctx, {
+                state.graficos.progreso = new Chart(canvas.getContext('2d'), {
                     type: 'bar',
                     data: {
-                        labels: data.map(p => p.fecha),
+                        labels: data.map(p => p.fecha.split('/')[0]), // Solo día
                         datasets: [{
                             label: 'Horas',
                             data: data.map(p => p.horas),
-                            backgroundColor: data.map(p => p.estado === 'NORMAL' ? '#198754' : p.estado.includes('RETRASO') ? '#ffc107' : '#0dcaf0')
+                            backgroundColor: data.map(p => {
+                                if (p.estado === 'NORMAL') return '#198754';
+                                if (p.estado.includes('RETRASO')) return '#ffc107';
+                                if (p.estado === 'AUSENTE') return '#dc3545';
+                                return '#0dcaf0';
+                            }),
+                            borderRadius: 4
                         }]
                     },
-                    options: { responsive: true, plugins: { legend: { display: false } } }
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { display: false } },
+                        scales: { y: { display: false }, x: { grid: { display: false }, ticks: { color: '#bdc3c7' } } }
+                    }
                 });
             }
 
             function crearGraficoDistribucion(data) {
-                const ctx = document.getElementById('grafico-distribucion').getContext('2d');
+                const canvas = document.getElementById('grafico-distribucion');
+                if (!canvas) return;
                 if (state.graficos.distribucion) state.graficos.distribucion.destroy();
 
-                state.graficos.distribucion = new Chart(ctx, {
+                state.graficos.distribucion = new Chart(canvas.getContext('2d'), {
                     type: 'doughnut',
                     data: {
                         labels: data.map(d => d.estado),
                         datasets: [{
                             data: data.map(d => d.cantidad),
-                            backgroundColor: ['#198754', '#ffc107', '#dc3545', '#0dcaf0', '#0d6efd', '#6c757d']
+                            backgroundColor: ['#198754', '#ffc107', '#dc3545', '#0dcaf0', '#0d6efd', '#6c757d'],
+                            borderWidth: 0
                         }]
                     },
-                    options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        cutout: '70%',
+                        plugins: { legend: { position: 'bottom', labels: { color: '#bdc3c7', boxWidth: 10 } } }
+                    }
                 });
             }
 
             function actualizarTimestamp() {
-                document.getElementById('timestamp-estadisticas').textContent = 'Actualizado: ' + new Date().toLocaleTimeString();
+                const el = document.getElementById('timestamp-estadisticas');
+                if (el) el.textContent = 'Actualizado: ' + new Date().toLocaleTimeString();
             }
 
             function cambiarMetricaGrafico(m) {
                 state.metricaGraficoActual = m;
                 document.querySelectorAll('.btn-group .btn').forEach(b => b.classList.remove('active'));
-                event.target.classList.add('active');
-                if (state.datos) crearGraficoTendencias(state.datos.datosGraficos.tendenciasSemanales);
+                if (event && event.target) event.target.classList.add('active');
+
+                if (state.datos && state.datos.datosGraficos) {
+                    crearGraficoTendencias(state.datos.datosGraficos.tendenciasSemanales);
+                }
             }
 
             async function recargarEstadisticas() { await cargarEstadisticas(true); }
-
-            function mostrarNotificacion(msg, type) {
-                const div = document.createElement('div');
-                div.className = `alert alert-${type} position-fixed top-0 start-50 translate-middle-x mt-3 z-3`;
-                div.innerHTML = `<i class="bi bi-info-circle me-2"></i>${msg}`;
-                document.body.appendChild(div);
-                setTimeout(() => div.remove(), 3000);
-            }
-
-            function exportarDatos() { mostrarNotificacion('Función de exportación en desarrollo', 'info'); }
 
             function configurarAutoRefresh() {
                 state.intervalos.push(setInterval(() => { if (!document.hidden) cargarEstadisticas(false); }, 300000));
             }
 
+            // --- INIT ---
             async function init() {
                 if (!document.getElementById('estadisticas-personales-container')) return;
-
+                mostrarPantallaCarga();
                 inicializarFechas();
-                // Cargamos datos (usará caché si existe, si no, mostrará carga)
                 await cargarEstadisticas(false);
-
                 configurarAutoRefresh();
             }
 
             if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
             else init();
 
-            return { init, cargarEstadisticas, recargarEstadisticas, cambiarMetricaGrafico, exportarDatos };
+            return { init, cargarEstadisticas, recargarEstadisticas, cambiarMetricaGrafico };
         })();
     </script>
+
 </body>
 </html>

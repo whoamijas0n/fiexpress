@@ -553,54 +553,97 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 
     <script>
-        // MÓDULO DASHBOARD EMPLEADO - Lógica Refinada
         window.DashboardEmpleado = (function () {
             'use strict';
 
             const state = {
                 datos: null,
                 intervalos: [],
-                pasosCarga: ["Iniciando...", "Datos personales...", "Estadísticas...", "Turnos...", "Fichajes...", "Métricas...", "Interfaz...", "Listo!"],
-                pasoActual: 0
+                pasosCarga: ["Conectando...", "Obteniendo perfil...", "Analizando asistencia...", "Calculando métricas...", "Finalizando..."]
             };
 
             const STORAGE_KEY = 'fiExpress_dashboard_data';
 
-            // --- PANTALLA CARGA ---
+            // --- GESTIÓN DE UI Y ERRORES ---
             function actualizarProgresoCarga(paso, msg = null) {
                 const bar = document.getElementById('loading-progress-bar');
                 const txt = document.getElementById('loading-steps');
-                const prog = ((paso + 1) / state.pasosCarga.length) * 100;
+                const total = state.pasosCarga.length;
+                const prog = Math.min(((paso + 1) / total) * 100, 100);
+
                 if (bar) bar.style.width = `${prog}%`;
-                if (txt) txt.textContent = msg || state.pasosCarga[paso];
-                state.pasoActual = paso;
+                if (txt) {
+                    txt.textContent = msg || state.pasosCarga[paso] || "Procesando...";
+                    if (msg && msg.includes("Error")) txt.style.color = "#ef4444";
+                }
             }
 
             function mostrarPantallaCarga() {
                 const overlay = document.getElementById('loading-overlay');
-                if (overlay.classList.contains('hidden')) {
+                const content = document.getElementById('dashboard-empleado-container');
+
+                if (overlay) {
                     overlay.classList.remove('hidden');
-                    document.getElementById('dashboard-empleado-container').classList.add('content-hidden');
-                    actualizarProgresoCarga(0);
+                    overlay.style.opacity = "1";
+                    overlay.style.visibility = "visible";
                 }
+                if (content) content.classList.add('content-hidden');
+                actualizarProgresoCarga(0);
             }
 
             function ocultarPantallaCarga() {
                 const overlay = document.getElementById('loading-overlay');
                 const content = document.getElementById('dashboard-empleado-container');
-                actualizarProgresoCarga(state.pasosCarga.length - 1, "¡Bienvenido!");
+
+                actualizarProgresoCarga(4, "¡Listo!");
+
                 setTimeout(() => {
-                    overlay.classList.add('hidden');
-                    content.classList.remove('content-hidden');
-                    content.classList.add('content-visible');
-                }, 600);
+                    if (overlay) {
+                        overlay.style.opacity = "0";
+                        overlay.classList.add('hidden');
+                        setTimeout(() => { overlay.style.visibility = "hidden"; }, 500);
+                    }
+                    if (content) {
+                        content.classList.remove('content-hidden');
+                        content.classList.add('content-visible');
+                    }
+                }, 500);
+            }
+
+            function mostrarNotificacion(msg, type) {
+                const div = document.createElement('div');
+                div.className = `alert alert-${type} position-fixed top-0 start-50 translate-middle-x mt-3 z-3 shadow`;
+                div.style.minWidth = "300px";
+                div.innerHTML = `<i class="bi bi-info-circle me-2"></i>${msg}`;
+                document.body.appendChild(div);
+                setTimeout(() => div.remove(), 4000);
+            }
+
+            // --- API SEGURA ---
+            async function apiCall(url, options = {}) {
+                try {
+                    const res = await fetch(url, {
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', ...options.headers },
+                        ...options
+                    });
+
+                    if (!res.ok) {
+                        const text = await res.text();
+                        console.error("API Error:", res.status, text);
+                        throw new Error(`Error del servidor (${res.status})`);
+                    }
+                    return await res.json();
+                } catch (e) {
+                    throw e; // Propagar error para manejo en caller
+                }
             }
 
             // --- STORAGE ---
             function guardarDatosEnStorage(datos) {
                 try {
                     sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ ...datos, timestamp: Date.now() }));
-                } catch (e) { }
+                } catch (e) { console.warn("Storage lleno"); }
             }
 
             function cargarDatosDesdeStorage() {
@@ -608,147 +651,166 @@
                     const raw = sessionStorage.getItem(STORAGE_KEY);
                     if (!raw) return null;
                     const data = JSON.parse(raw);
-                    if (Date.now() - data.timestamp > 300000) { // 5 minutos
+                    // Cache válido por 5 minutos
+                    if (Date.now() - data.timestamp > 300000) {
                         sessionStorage.removeItem(STORAGE_KEY); return null;
                     }
                     return data;
                 } catch (e) { return null; }
             }
 
-            // --- API ---
-            async function apiCall(url, options = {}) {
-                try {
-                    const res = await fetch(url, { credentials: 'include', headers: { 'Content-Type': 'application/json', ...options.headers }, ...options });
-                    if (!res.ok) throw new Error(`Error ${res.status}`);
-                    return await res.json();
-                } catch (e) {
-                    console.error('API Error:', e);
-                    return null;
-                }
-            }
-
-            // --- CARGAR ---
+            // --- CORE LÓGICA ---
             async function cargarDashboard(forceRefresh = false) {
-                if (!forceRefresh) {
-                    const cached = cargarDatosDesdeStorage();
-                    if (cached) {
-                        state.datos = cached;
+                try {
+                    // 1. Intentar cargar caché si no es refresh forzado
+                    if (!forceRefresh) {
+                        const cached = cargarDatosDesdeStorage();
+                        if (cached) {
+                            console.log("Cargando desde caché local...");
+                            state.datos = cached;
+                            actualizarVistaCompleta();
+                            ocultarPantallaCarga(); // Importante: ocultar si es caché
+                            return;
+                        }
+                    }
+
+                    mostrarPantallaCarga();
+                    actualizarProgresoCarga(1, forceRefresh ? "Recalculando datos..." : "Consultando servidor...");
+
+                    // 2. Llamada a la API
+                    // Si es refresh manual, añadimos el flag al query string
+                    const url = forceRefresh
+                        ? '/api/estadisticas/dashboard-empleado?forzarRecalculo=true'
+                        : '/api/estadisticas/dashboard-empleado';
+
+                    const data = await apiCall(url);
+
+                    if (!data || !data.empleado) {
+                        throw new Error("Datos recibidos incompletos");
+                    }
+
+                    actualizarProgresoCarga(3, "Procesando métricas...");
+
+                    // 3. Guardar y Renderizar
+                    state.datos = data;
+                    guardarDatosEnStorage(data);
+
+                    // Renderizado en el siguiente frame para no bloquear UI
+                    requestAnimationFrame(() => {
                         actualizarVistaCompleta();
-                        ocultarPantallaCarga();
-                        return;
-                    }
+                        if (forceRefresh) mostrarNotificacion('Dashboard actualizado', 'success');
+                    });
+
+                } catch (e) {
+                    console.error("Error crítico en dashboard:", e);
+                    mostrarNotificacion(`No se pudo cargar el dashboard: ${e.message}`, 'danger');
+                    actualizarProgresoCarga(4, "Error de carga");
+                } finally {
+                    // 4. GARANTÍA DE SALIDA: Ocultar pantalla de carga siempre
+                    ocultarPantallaCarga();
                 }
-
-                actualizarProgresoCarga(1, "Consultando servidor...");
-                const data = await apiCall('/api/estadisticas/dashboard-empleado');
-
-                if (!data) {
-                    if (!document.getElementById('loading-overlay').classList.contains('hidden')) {
-                        document.getElementById('loading-steps').textContent = "Error de conexión. Reintentando...";
-                        setTimeout(() => cargarDashboard(forceRefresh), 3000);
-                    }
-                    return;
-                }
-
-                state.datos = data;
-                guardarDatosEnStorage(data);
-
-                actualizarProgresoCarga(4, "Procesando datos...");
-                actualizarVistaCompleta();
-
-                ocultarPantallaCarga();
-                if (forceRefresh) mostrarNotificacion('Datos actualizados', 'success');
             }
 
+            // --- RENDERIZADO VISUAL ---
             function actualizarVistaCompleta() {
-                actualizarInfoEmpleado();
-                actualizarEstadoActual();
-                actualizarEstadisticas();
-                actualizarTurnoActivo();
-                actualizarDiasTurno();
-                actualizarFichajesHoy();
-                actualizarProgresoMes();
-                actualizarFechas();
+                if (!state.datos) return;
+                try {
+                    actualizarInfoEmpleado();
+                    actualizarEstadoActual();
+                    actualizarEstadisticas();
+                    actualizarTurnoActivo();
+                    actualizarDiasTurno();
+                    actualizarFichajesHoy();
+                    actualizarProgresoMes();
+                    actualizarFechas();
+                } catch (err) {
+                    console.error("Error renderizando vista:", err);
+                }
             }
 
-            // --- UI UPDATES ---
             function actualizarInfoEmpleado() {
                 const emp = state.datos.empleado;
-                if (!emp) return;
-                document.getElementById('empleado-nombre').textContent = emp.nombre || 'Empleado';
-                document.getElementById('empleado-codigo').textContent = emp.codigo_empleado || '-';
-                document.getElementById('empleado-departamento').textContent = emp.departamento || '-';
+                setText('empleado-nombre', emp.nombre);
+                setText('empleado-codigo', emp.codigo_empleado);
+                setText('empleado-departamento', emp.departamento);
+
                 const img = document.getElementById('empleado-avatar');
-                img.src = emp.foto_url || `https://ui-avatars.com/api/?name=${encodeURIComponent(emp.nombre || 'U')}&size=100&background=0D6EFD&color=fff`;
+                if (img) img.src = emp.foto_url || `https://ui-avatars.com/api/?name=${encodeURIComponent(emp.nombre)}&size=100&background=0D6EFD&color=fff`;
             }
 
             function actualizarEstadoActual() {
                 const estado = state.datos.estadoActual || 'Desconocido';
                 const last = state.datos.ultimoFichaje;
-                document.getElementById('estado-actual-text').textContent = estado;
-                document.getElementById('estado-detalle').textContent = last ?
-                    `Último: ${last.tipo} a las ${last.hora}` : 'Sin registros hoy';
+
+                setText('estado-actual-text', estado);
+                setText('estado-detalle', last ? `Último: ${last.tipo} a las ${last.hora}` : 'Sin registros hoy');
+
                 const alert = document.getElementById('alert-estado');
+                if (!alert) return;
+
                 alert.className = 'alert d-flex align-items-center animate-delay-2 p-3 rounded-3 shadow-sm ';
-                if (estado.toLowerCase().includes('trabajando') || estado.toLowerCase().includes('dentro')) {
+                const icon = alert.querySelector('i');
+
+                if (estado.includes('trabajo') || estado.includes('En')) {
                     alert.classList.add('alert-glass-success');
-                    alert.querySelector('i').className = 'bi bi-check-circle-fill fs-3 me-3';
-                } else if (estado.toLowerCase().includes('fuera')) {
+                    icon.className = 'bi bi-check-circle-fill fs-3 me-3';
+                } else if (estado.includes('Fuera')) {
                     alert.classList.add('alert-glass-warning');
-                    alert.querySelector('i').className = 'bi bi-pause-circle-fill fs-3 me-3';
+                    icon.className = 'bi bi-pause-circle-fill fs-3 me-3';
                 } else {
                     alert.classList.add('alert-glass-info');
-                    alert.querySelector('i').className = 'bi bi-info-circle-fill fs-3 me-3';
+                    icon.className = 'bi bi-info-circle-fill fs-3 me-3';
                 }
             }
 
             function actualizarEstadisticas() {
                 const r = state.datos.resumenMes || {};
-                document.getElementById('stat-asistencia').textContent = (r.porcentajeAsistencia || 0) + '%';
-                document.getElementById('barra-asistencia').style.width = (r.porcentajeAsistencia || 0) + '%';
-                document.getElementById('stat-dias-asistencia').textContent = `${r.diasTrabajados || 0}/${r.totalDias || 0} días`;
+
+                setText('stat-asistencia', (r.porcentajeAsistencia || 0) + '%');
+                setBarWidth('barra-asistencia', (r.porcentajeAsistencia || 0));
+                setText('stat-dias-asistencia', `${r.diasTrabajados || 0}/${r.totalDias || 0} días`);
 
                 const h = Math.floor((r.totalMinutosTrabajados || 0) / 60);
                 const m = (r.totalMinutosTrabajados || 0) % 60;
-                document.getElementById('stat-horas-trabajadas').textContent = h + 'h';
-                document.getElementById('stat-minutos-trabajados').textContent = m + ' min';
+                setText('stat-horas-trabajadas', h + 'h');
+                setText('stat-minutos-trabajados', m + ' min');
 
-                document.getElementById('stat-retraso').textContent = (r.totalMinutosRetraso || 0) + 'm';
-                document.getElementById('stat-extra').textContent = (r.totalMinutosExtra || 0) + 'm';
+                setText('stat-retraso', (r.totalMinutosRetraso || 0) + 'm');
+                setText('stat-extra', (r.totalMinutosExtra || 0) + 'm');
             }
 
-            // ✅ FIX: Lógica robusta para turno activo
             function actualizarTurnoActivo() {
                 const t = state.datos.horarioActivo;
                 const c = document.getElementById('turno-activo-container');
                 const b = document.getElementById('badge-turno-activo');
 
+                if (!c || !b) return;
+
                 if (!t) {
-                    c.innerHTML = `<div class="text-center text-muted py-3"><i class="bi bi-calendar-x fs-1 mb-2 d-block opacity-50"></i><small>Sin turno asignado</small></div>`;
+                    c.innerHTML = `<div class="text-center text-muted py-3"><i class="bi bi-calendar-x fs-1 mb-2 d-block opacity-50"></i><small>Sin turno asignado hoy</small></div>`;
                     b.textContent = 'Inactivo'; b.className = 'badge bg-secondary';
                     return;
                 }
 
-                // Soporte para diferentes formatos de propiedad
                 const nombre = t.nombre || t.nombreTurno || 'Turno';
                 const entrada = t.hora_entrada || t.horaEntrada || '--:--';
                 const salida = t.hora_salida || t.horaSalida || '--:--';
-                const tolerancia = t.tolerancia_minutos || t.toleranciaMinutos || 0;
+                const tol = t.tolerancia_minutos || t.toleranciaMinutos || 0;
 
                 c.innerHTML = `
-                        <div class="text-center">
-                            <h5 class="text-white mb-1">${nombre}</h5>
-                            <div class="fs-4 fw-bold text-primary">${entrada} - ${salida}</div>
-                            <span class="badge bg-info bg-opacity-25 text-info border border-info border-opacity-25 mt-2">Tol: ${tolerancia}m</span>
-                        </div>
-                    `;
+                    <div class="text-center">
+                        <h5 class="text-white mb-1">${nombre}</h5>
+                        <div class="fs-4 fw-bold text-primary">${entrada} - ${salida}</div>
+                        <span class="badge bg-info bg-opacity-25 text-info border border-info border-opacity-25 mt-2">Tol: ${tol}m</span>
+                    </div>`;
                 b.textContent = 'Activo'; b.className = 'badge bg-success';
             }
 
-            // ✅ FIX: Lógica robusta para días
             function actualizarDiasTurno() {
                 const t = state.datos.horarioActivo;
                 const c = document.getElementById('dias-turno-container');
+                if (!c) return;
+
                 if (!t) { c.innerHTML = '<small class="text-muted">Sin datos</small>'; return; }
 
                 const days = [
@@ -757,32 +819,30 @@
                 ];
                 const todayIdx = new Date().getDay() === 0 ? 6 : new Date().getDay() - 1;
 
-                // Verificar si las propiedades vienen directas (admin style) o en objeto anidado
-                const getDiaActivo = (key) => {
-                    if (t[key] !== undefined) return t[key]; // Propiedad directa
-                    if (t.diasActivos && t.diasActivos[key] !== undefined) return t.diasActivos[key]; // Objeto anidado
-                    return false;
+                // Helper para obtener booleanos de dias
+                const getActive = (k) => {
+                    if (t.diasActivos) return t.diasActivos[k];
+                    return t[k]; // fallback
                 };
 
-                c.innerHTML = `
-                        <div class="d-flex justify-content-between">
-                            ${days.map((d, i) => {
-                    const activo = getDiaActivo(d.k);
-                    return `
-                                    <div class="dia-block rounded p-2 text-center ${activo ? (i === todayIdx ? 'active' : '') : 'inactive'}">
-                                        <div class="fw-bold small">${d.l}</div>
-                                        <i class="bi ${activo ? 'bi-check' : 'bi-dash'} small"></i>
-                                    </div>
-                                `;
+                c.innerHTML = `<div class="d-flex justify-content-between">
+                    ${days.map((d, i) => {
+                    const active = getActive(d.k);
+                    const isToday = i === todayIdx;
+                    return `<div class="dia-block rounded p-2 text-center ${active ? (isToday ? 'active' : '') : 'inactive'}">
+                            <div class="fw-bold small">${d.l}</div>
+                            <i class="bi ${active ? 'bi-check' : 'bi-dash'} small"></i>
+                        </div>`;
                 }).join('')}
-                        </div>
-                    `;
+                </div>`;
             }
 
             function actualizarFichajesHoy() {
                 const f = state.datos.fichajesHoy || [];
                 const c = document.getElementById('fichajes-hoy-container');
-                document.getElementById('contador-fichajes').textContent = f.length;
+                setText('contador-fichajes', f.length);
+
+                if (!c) return;
 
                 if (f.length === 0) {
                     c.innerHTML = `<div class="text-center text-muted py-3"><small>Sin registros hoy</small></div>`;
@@ -790,16 +850,14 @@
                 }
 
                 c.innerHTML = f.map(x => `
-                        <div class="card fichaje-card mb-2 ${x.tipo === 'Entrada' ? 'fichaje-entrada' : 'fichaje-salida'}">
-                            <div class="card-body py-2 px-3 d-flex justify-content-between align-items-center">
-                                <div>
-                                    <span class="badge ${x.tipo === 'Entrada' ? 'bg-success' : 'bg-danger'} me-2">${x.tipo}</span>
-                                    <span class="fw-bold text-white">${x.hora}</span>
-                                </div>
-                                <small class="text-muted">${x.fecha}</small>
+                    <div class="card fichaje-card mb-2 ${x.tipo === 'Entrada' ? 'fichaje-entrada' : 'fichaje-salida'}">
+                        <div class="card-body py-2 px-3 d-flex justify-content-between align-items-center">
+                            <div>
+                                <span class="badge ${x.tipo === 'Entrada' ? 'bg-success' : 'bg-danger'} me-2">${x.tipo}</span>
+                                <span class="fw-bold text-white">${x.hora}</span>
                             </div>
                         </div>
-                    `).join('');
+                    </div>`).join('');
             }
 
             function actualizarProgresoMes() {
@@ -807,61 +865,55 @@
                 const totalDays = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
                 const prog = (now.getDate() / totalDays) * 100;
 
-                document.getElementById('progreso-mes-text').textContent = Math.round(prog) + '%';
-                document.getElementById('barra-mes').style.width = prog + '%';
+                setText('progreso-mes-text', Math.round(prog) + '%');
+                setBarWidth('barra-mes', prog);
 
                 const target = state.datos.resumenMes?.porcentajeAsistencia || 0;
-                document.getElementById('objetivo-asistencia-text').textContent = target + '%';
-                document.getElementById('barra-objetivo').style.width = target + '%';
+                setText('objetivo-asistencia-text', target + '%');
+                setBarWidth('barra-objetivo', target);
 
-                document.getElementById('dias-restantes').textContent = `${totalDays - now.getDate()} días restantes`;
+                setText('dias-restantes', `${totalDays - now.getDate()} días restantes`);
             }
 
             function actualizarFechas() {
                 const d = new Date();
                 const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
-                document.getElementById('fecha-actual').textContent = d.toLocaleDateString('es-ES', options);
-                document.getElementById('timestamp-fichajes').textContent = d.toLocaleTimeString();
+                setText('fecha-actual', d.toLocaleDateString('es-ES', options));
+                setText('timestamp-fichajes', d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
             }
 
-            // --- UTILS ---
-            function recargarDashboard() { cargarDashboard(true); }
-            async function recargarFichajes() { await cargarDashboard(true); }
-            function verEstadisticasCompletas() { navegar('estadisticas-personales', 'Mis Estadísticas'); }
-            function verMisFichajes() { navegar('fichajes-personales', 'Mis Fichajes'); }
-            function solicitarPermiso() { navegar('permisos-empleado', 'Solicitar Permiso'); }
-            function verNotificaciones() { navegar('notificaciones-empleado', 'Notificaciones'); }
-            function verHorario() { navegar('horario-personal', 'Mi Horario'); }
+            // --- HELPERS DOM ---
+            function setText(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; }
+            function setBarWidth(id, pct) { const el = document.getElementById(id); if (el) el.style.width = `${pct}%`; }
 
+            // --- NAVEGACIÓN ---
             function navegar(vista, titulo) {
                 if (window.cargarVista) window.cargarVista(vista, titulo);
-                else mostrarNotificacion('Navegación no disponible', 'warning');
+                else mostrarNotificacion('Navegación no implementada en este contexto', 'warning');
             }
 
-            function mostrarNotificacion(msg, type) {
-                const div = document.createElement('div');
-                div.className = `alert alert-${type} position-fixed top-0 start-50 translate-middle-x mt-3 z-3 shadow`;
-                div.innerHTML = `<i class="bi bi-info-circle me-2"></i>${msg}`;
-                document.body.appendChild(div);
-                setTimeout(() => div.remove(), 3000);
-            }
-
-            function configurarAutoRefresh() {
-                state.intervalos.push(setInterval(() => { if (!document.hidden) cargarDashboard(false); }, 300000));
-            }
+            // --- AUTO-INIT ---
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => init());
+            else init();
 
             async function init() {
                 if (!document.getElementById('dashboard-empleado-container')) return;
-                mostrarPantallaCarga();
+                // Configurar auto-refresh cada 5 mins
+                state.intervalos.push(setInterval(() => { if (!document.hidden) cargarDashboard(false); }, 300000));
+                // Carga inicial
                 await cargarDashboard(false);
-                configurarAutoRefresh();
             }
 
-            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
-            else init();
-
-            return { init, recargarDashboard, recargarFichajes, verEstadisticasCompletas, verMisFichajes, solicitarPermiso, verNotificaciones, verHorario };
+            // --- PUBLIC API ---
+            return {
+                recargarDashboard: () => cargarDashboard(true),
+                verEstadisticasCompletas: () => navegar('estadisticas-personales', 'Mis Estadísticas'),
+                verMisFichajes: () => navegar('fichajes-personales', 'Mis Fichajes'),
+                solicitarPermiso: () => navegar('permisos-empleado', 'Solicitar Permiso'),
+                verNotificaciones: () => navegar('notificaciones-empleado', 'Notificaciones')
+            };
         })();
     </script>
+
 </body>
 </html>

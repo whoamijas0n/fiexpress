@@ -399,7 +399,6 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 
     <script>
-        // MÓDULO ESTADÍSTICAS - Lógica Preservada con Renderizado Visual Actualizado
         window.EstadisticasModule = (function () {
             'use strict';
 
@@ -410,299 +409,375 @@
                 estadisticasOriginales: null,
                 mostrarSoloActivos: true,
                 busquedaActual: '',
-                pasosCarga: ["Iniciando...", "Cargando empleados...", "Obteniendo departamentos...", "Configurando filtros...", "Calculando métricas...", "Procesando datos...", "Finalizando...", "¡Listo!"],
-                pasoActual: 0
+                pasosCarga: ["Iniciando sistema...", "Obteniendo catálogos...", "Consultando estadísticas...", "Renderizando...", "Finalizado"]
             };
 
             const STORAGE_KEY = 'fiExpress_estadisticas_data';
 
-            // --- PANTALLA DE CARGA ---
+            // --- UI HELPERS ---
             function actualizarProgresoCarga(paso, msg = null) {
                 const bar = document.getElementById('loading-progress-bar');
                 const txt = document.getElementById('loading-steps');
-                const prog = ((paso + 1) / state.pasosCarga.length) * 100;
-                if (bar) bar.style.width = `${prog}%`;
-                if (txt) txt.textContent = msg || state.pasosCarga[paso];
-                state.pasoActual = paso;
+                const total = state.pasosCarga.length;
+                const porcentaje = Math.min(((paso + 1) / total) * 100, 100);
+
+                if (bar) bar.style.width = `${porcentaje}%`;
+                if (txt) {
+                    txt.textContent = msg || state.pasosCarga[paso] || "Procesando...";
+                    if (msg && msg.includes("Error")) txt.style.color = "#ef4444"; // Rojo si es error
+                }
             }
 
             function mostrarPantallaCarga() {
                 const ov = document.getElementById('loading-overlay');
                 const co = document.getElementById('estadisticas-container');
-                ov.classList.remove('hidden');
-                co.classList.remove('content-visible');
-                co.classList.add('content-hidden');
+                if (ov) {
+                    ov.classList.remove('hidden');
+                    ov.style.opacity = "1";
+                    ov.style.visibility = "visible";
+                }
+                if (co) co.classList.add('content-hidden');
                 actualizarProgresoCarga(0);
             }
 
             function ocultarPantallaCarga() {
                 const ov = document.getElementById('loading-overlay');
                 const co = document.getElementById('estadisticas-container');
-                actualizarProgresoCarga(state.pasosCarga.length - 1, "¡Listo!");
+                actualizarProgresoCarga(4, "¡Listo!");
+
                 setTimeout(() => {
-                    ov.classList.add('hidden');
-                    co.classList.remove('content-hidden');
-                    co.classList.add('content-visible');
-                }, 600);
+                    if (ov) {
+                        ov.style.opacity = "0";
+                        ov.classList.add('hidden');
+                        // Esperar a que termine la transición CSS para ocultar visibility
+                        setTimeout(() => { ov.style.visibility = "hidden"; }, 500);
+                    }
+                    if (co) {
+                        co.classList.remove('content-hidden');
+                        co.classList.add('content-visible');
+                    }
+                }, 500);
+            }
+
+            function mostrarAlerta(msg, type) {
+                const container = document.body;
+                const div = document.createElement('div');
+                div.className = `alert alert-${type} position-fixed top-0 start-50 translate-middle-x mt-3 z-3 shadow`;
+                div.style.minWidth = "300px";
+                div.innerHTML = `<i class="bi bi-info-circle me-2"></i>${msg}`;
+                container.appendChild(div);
+                setTimeout(() => div.remove(), 4000);
+            }
+
+            // --- API SEGURA ---
+            async function apiCall(url, options = {}) {
+                try {
+                    const res = await fetch(url, {
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', ...options.headers },
+                        ...options
+                    });
+
+                    // Si el servidor devuelve error 500 o 400
+                    if (!res.ok) {
+                        const textoError = await res.text();
+                        console.error("Error API:", url, res.status, textoError);
+                        throw new Error(`Error del servidor (${res.status})`);
+                    }
+
+                    // Intentar parsear JSON
+                    try {
+                        return await res.json();
+                    } catch (jsonError) {
+                        console.error("Error parseando JSON:", jsonError);
+                        throw new Error("Respuesta inválida del servidor");
+                    }
+
+                } catch (e) {
+                    throw e; // Relanzar para manejar en el caller
+                }
+            }
+
+            // --- CORE ---
+            async function init() {
+                mostrarPantallaCarga();
+                try {
+                    configurarFechasPorDefecto(); // Paso 0
+
+                    // Paso 1: Catálogos
+                    actualizarProgresoCarga(1, "Cargando empleados y departamentos...");
+
+                    // Ejecución en paralelo pero con manejo individual de errores
+                    const [emps, depts] = await Promise.all([
+                        apiCall('/api/empleados?incluirInactivos=true').catch(err => { console.warn("Fallo empleados", err); return []; }),
+                        apiCall('/api/departamentos?incluirInactivos=true').catch(err => { console.warn("Fallo deptos", err); return []; })
+                    ]);
+
+                    state.empleados = Array.isArray(emps) ? emps : [];
+                    state.departamentos = Array.isArray(depts) ? depts : [];
+
+                    renderizarFiltros();
+                    configurarBusquedaRapida();
+
+                    // Paso 2: Estadísticas
+                    // Intentamos cargar caché primero para velocidad
+                    const cached = cargarDatosDesdeStorage();
+                    if (cached) {
+                        console.log("Usando caché local");
+                        state.estadisticas = cached;
+                        state.estadisticasOriginales = JSON.parse(JSON.stringify(cached));
+                        actualizarProgresoCarga(3, "Renderizando desde caché...");
+                        actualizarVistaCompleta();
+                    } else {
+                        console.log("Consultando API...");
+                        await ejecutarCargaEstadisticas(false);
+                    }
+
+                } catch (e) {
+                    console.error("Error crítico en init:", e);
+                    actualizarProgresoCarga(4, `Error: ${e.message}`);
+                    mostrarAlerta("Error al inicializar el sistema. Revise la consola.", "danger");
+                } finally {
+                    // ESTO ES CLAVE: Asegura que el overlay se vaya siempre
+                    ocultarPantallaCarga();
+                }
+            }
+
+            async function ejecutarCargaEstadisticas(forzarProcesamiento = false) {
+                try {
+                    const ini = document.getElementById('filtro-inicio').value;
+                    const fin = document.getElementById('filtro-fin').value;
+                    const dep = document.getElementById('filtro-departamento').value;
+
+                    if (!ini || !fin) {
+                        mostrarAlerta('Fechas inválidas', 'warning');
+                        return;
+                    }
+
+                    if (!forzarProcesamiento) mostrarPantallaCarga();
+                    actualizarProgresoCarga(2, forzarProcesamiento ? "Recalculando datos..." : "Consultando datos...");
+
+                    let url = `/api/estadisticas/generales?inicio=${ini}&fin=${fin}`;
+                    if (dep) url += `&departamentoId=${dep}`;
+                    if (forzarProcesamiento) url += `&forzarProcesamiento=true`;
+
+                    const data = await apiCall(url);
+
+                    // Validación de estructura de datos
+                    if (!data || !data.estadisticasDetalladas) {
+                        console.warn("Estructura de datos incorrecta recibida:", data);
+                        throw new Error("Datos de estadísticas vacíos o incorrectos");
+                    }
+
+                    state.estadisticas = data;
+                    state.estadisticasOriginales = JSON.parse(JSON.stringify(data));
+
+                    actualizarProgresoCarga(3, "Renderizando...");
+                    guardarDatosEnStorage(data);
+                    actualizarVistaCompleta();
+
+                    if (forzarProcesamiento) mostrarAlerta('Datos actualizados', 'success');
+
+                } catch (e) {
+                    console.error("Error cargando estadísticas:", e);
+                    mostrarAlerta(`No se pudieron cargar los datos: ${e.message}`, "danger");
+                } finally {
+                    ocultarPantallaCarga();
+                }
+            }
+
+            // --- RENDERIZADO (Protegido contra nulos) ---
+            function actualizarVistaCompleta() {
+                if (!state.estadisticas) return;
+                try {
+                    actualizarKpis();
+                    renderizarGridCards();
+                    actualizarBotonesVista();
+                } catch (e) {
+                    console.error("Error en renderizado:", e);
+                    mostrarAlerta("Error visualizando los datos", "warning");
+                }
+            }
+
+            function actualizarKpis() {
+                const res = state.estadisticas.resumenGeneral || {};
+                const totalEmps = state.estadisticas.estadisticasDetalladas ? state.estadisticas.estadisticasDetalladas.length : 0;
+
+                // Safe setters
+                const safeSet = (id, val) => {
+                    const el = document.getElementById(id);
+                    if (el) el.textContent = val;
+                };
+
+                safeSet('stat-total-empleados', totalEmps);
+                safeSet('stat-asistencia', `${(res.promedioAsistencia || 0).toFixed(1)}%`);
+                safeSet('stat-retraso', `${Math.floor((res.totalRetraso || 0) / 60)}h`);
+                safeSet('stat-extra', `${Math.floor((res.totalExtra || 0) / 60)}h`);
+            }
+
+            function renderizarGridCards() {
+                const container = document.getElementById('lista-estadisticas');
+                if (!container) return;
+
+                const data = state.estadisticasOriginales || state.estadisticas;
+
+                if (!data || !Array.isArray(data.estadisticasDetalladas)) {
+                    container.innerHTML = `<div class="col-12 text-center py-5 text-muted">No hay datos disponibles</div>`;
+                    return;
+                }
+
+                let lista = [...data.estadisticasDetalladas];
+
+                // Filtros en memoria
+                try {
+                    lista = lista.filter(est => {
+                        if (!est.empleado) return false;
+                        const emp = state.empleados.find(e => e.idEmpleado === est.empleado.idEmpleado);
+                        // Si no encontramos al empleado en la lista global, asumimos estado por defecto del filtro
+                        if (!emp) return true;
+                        return state.mostrarSoloActivos ? emp.activo : !emp.activo;
+                    });
+
+                    if (state.busquedaActual) {
+                        const txt = state.busquedaActual.toLowerCase();
+                        lista = lista.filter(est => {
+                            const n = (est.empleado?.nombre || '').toLowerCase();
+                            const c = (est.empleado?.codigo_empleado || '').toLowerCase();
+                            return n.includes(txt) || c.includes(txt);
+                        });
+                    }
+                } catch (filterErr) {
+                    console.error("Error filtrando lista:", filterErr);
+                }
+
+                if (lista.length === 0) {
+                    container.innerHTML = `<div class="col-12 text-center py-5 text-muted">No se encontraron resultados.</div>`;
+                    return;
+                }
+
+                // Renderizado seguro (Límite 100 para rendimiento)
+                const html = lista.slice(0, 100).map(est => {
+                    const nombre = est.empleado?.nombre || 'Sin Nombre';
+                    const depto = est.empleado?.departamento || 'Sin Depto';
+                    // Fallback seguro para avatar
+                    const iniciales = nombre.substring(0, 2).toUpperCase();
+                    const avatar = est.empleado?.foto_url || `https://ui-avatars.com/api/?name=${encodeURIComponent(iniciales)}&background=random&color=fff`;
+
+                    const asis = est.porcentajeAsistencia || 0;
+                    const colorAsis = asis >= 90 ? 'bg-success' : asis >= 70 ? 'bg-warning' : 'bg-danger';
+                    const textAsis = asis >= 90 ? 'text-success' : asis >= 70 ? 'text-warning' : 'text-danger';
+
+                    return `
+                    <div class="col-md-6 col-lg-4 animate-entry">
+                        <div class="card card-estadistica h-100">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center mb-3">
+                                    <img src="${avatar}" class="avatar rounded-circle me-3" loading="lazy" onerror="this.src='https://ui-avatars.com/api/?name=NA'">
+                                    <div class="flex-grow-1 overflow-hidden">
+                                        <h6 class="mb-0 fw-bold text-white text-truncate">${nombre}</h6>
+                                        <small class="text-muted d-block">${depto}</small>
+                                    </div>
+                                    <div class="text-end">
+                                        <h5 class="mb-0 fw-bold ${textAsis}">${asis}%</h5>
+                                        <small class="text-muted" style="font-size: 0.7rem;">ASISTENCIA</small>
+                                    </div>
+                                </div>
+                                <div class="progress mb-3" style="background: rgba(255,255,255,0.05);">
+                                    <div class="progress-bar ${colorAsis}" style="width: ${asis}%"></div>
+                                </div>
+                                <div class="d-flex justify-content-between text-center pt-2 border-top border-secondary border-opacity-10">
+                                    <div><div class="fw-bold text-white">${est.diasTrabajados || 0}/${est.totalDias || 0}</div><small class="text-muted" style="font-size:0.7rem">DÍAS</small></div>
+                                    <div><div class="fw-bold text-warning">${Math.floor((est.totalMinutosRetraso || 0) / 60)}h</div><small class="text-muted" style="font-size:0.7rem">RETRASO</small></div>
+                                    <div><div class="fw-bold text-info">${Math.floor((est.totalMinutosExtra || 0) / 60)}h</div><small class="text-muted" style="font-size:0.7rem">EXTRA</small></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>`;
+                }).join('');
+
+                container.innerHTML = html;
+            }
+
+            function renderizarFiltros() {
+                const sel = document.getElementById('filtro-departamento');
+                if (!sel) return;
+                sel.innerHTML = '<option value="">Todos los departamentos</option>';
+                if (Array.isArray(state.departamentos)) {
+                    state.departamentos.forEach(d => {
+                        sel.innerHTML += `<option value="${d.idDepartamento}">${d.nombre}</option>`;
+                    });
+                }
+            }
+
+            // --- UTILS ---
+            function configurarFechasPorDefecto() {
+                const hoy = new Date();
+                const inicio = new Date();
+                inicio.setDate(hoy.getDate() - 30);
+
+                const iEl = document.getElementById('filtro-inicio');
+                const fEl = document.getElementById('filtro-fin');
+
+                if (iEl) iEl.value = inicio.toISOString().split('T')[0];
+                if (fEl) fEl.value = hoy.toISOString().split('T')[0];
+            }
+
+            function configurarBusquedaRapida() {
+                const input = document.getElementById('busqueda-rapida');
+                if (!input) return;
+
+                let timeout = null;
+                input.addEventListener('input', (e) => {
+                    clearTimeout(timeout);
+                    timeout = setTimeout(() => {
+                        state.busquedaActual = e.target.value.trim();
+                        renderizarGridCards();
+                    }, 300);
+                });
             }
 
             // --- STORAGE ---
             function guardarDatosEnStorage(datos) {
                 try {
-                    const obj = {
-                        ...datos, timestamp: Date.now(),
-                        filtros: {
-                            inicio: document.getElementById('filtro-inicio').value,
-                            fin: document.getElementById('filtro-fin').value,
-                            departamento: document.getElementById('filtro-departamento').value
-                        }
+                    const i = document.getElementById('filtro-inicio')?.value;
+                    const f = document.getElementById('filtro-fin')?.value;
+                    const d = document.getElementById('filtro-departamento')?.value;
+
+                    const cacheData = {
+                        data: datos,
+                        timestamp: Date.now(),
+                        filtros: { inicio: i, fin: f, departamento: d }
                     };
-                    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
-                } catch (e) { }
+                    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(cacheData));
+                } catch (e) { console.warn("Cache storage error", e); }
             }
 
             function cargarDatosDesdeStorage() {
                 try {
                     const raw = sessionStorage.getItem(STORAGE_KEY);
                     if (!raw) return null;
-                    const data = JSON.parse(raw);
+                    const parsed = JSON.parse(raw);
 
-                    // Validar caducidad (5 min) y filtros
-                    const currentFilters = {
-                        inicio: document.getElementById('filtro-inicio').value,
-                        fin: document.getElementById('filtro-fin').value,
-                        departamento: document.getElementById('filtro-departamento').value
+                    const curFilters = {
+                        inicio: document.getElementById('filtro-inicio')?.value,
+                        fin: document.getElementById('filtro-fin')?.value,
+                        departamento: document.getElementById('filtro-departamento')?.value
                     };
-                    if (Date.now() - data.timestamp > 300000 || JSON.stringify(data.filtros) !== JSON.stringify(currentFilters)) {
-                        sessionStorage.removeItem(STORAGE_KEY); return null;
+
+                    // Cache valido 2 min y si filtros coinciden
+                    if (Date.now() - parsed.timestamp < 120000 &&
+                        JSON.stringify(parsed.filtros) === JSON.stringify(curFilters)) {
+                        return parsed.data;
                     }
-                    return data;
+                    return null;
                 } catch (e) { return null; }
             }
-
-            // --- API ---
-            async function apiCall(url, options = {}) {
-                try {
-                    const res = await fetch(url, { credentials: 'include', headers: { 'Content-Type': 'application/json', ...options.headers }, ...options });
-                    if (!res.ok) throw new Error(`Error ${res.status}`);
-                    return await res.json();
-                } catch (e) {
-                    console.error('API Error:', e);
-                    mostrarAlerta(`Error: ${e.message}`, 'danger');
-                    throw e;
-                }
-            }
-
-            // --- CORE ---
-            async function cargarEstadisticas(forceRefresh = false) {
-                if (!forceRefresh) {
-                    const cached = cargarDatosDesdeStorage();
-                    if (cached) {
-                        state.estadisticas = cached;
-                        state.estadisticasOriginales = JSON.parse(JSON.stringify(cached));
-                        actualizarVistaCompleta();
-                        ocultarPantallaCarga();
-                        return;
-                    }
-                }
-
-                mostrarPantallaCarga();
-                try {
-                    actualizarProgresoCarga(1, "Validando...");
-                    const ini = document.getElementById('filtro-inicio').value;
-                    const fin = document.getElementById('filtro-fin').value;
-                    const dep = document.getElementById('filtro-departamento').value;
-
-                    if (!ini || !fin) { mostrarAlerta('Selecciona un rango de fechas', 'warning'); ocultarPantallaCarga(); return; }
-                    if (new Date(ini) > new Date(fin)) { mostrarAlerta('Fecha inicio mayor a fin', 'warning'); ocultarPantallaCarga(); return; }
-
-                    let url = `/api/estadisticas/generales?inicio=${ini}&fin=${fin}`;
-                    if (dep) url += `&departamentoId=${dep}`;
-
-                    actualizarProgresoCarga(2, "Consultando datos...");
-                    state.estadisticas = await apiCall(url);
-                    state.estadisticasOriginales = JSON.parse(JSON.stringify(state.estadisticas));
-
-                    actualizarProgresoCarga(3, "Procesando...");
-                    guardarDatosEnStorage(state.estadisticas);
-                    actualizarVistaCompleta();
-
-                    mostrarAlerta('Estadísticas actualizadas', 'success');
-                    ocultarPantallaCarga();
-                } catch (e) {
-                    ocultarPantallaCarga();
-                }
-            }
-
-            function actualizarEstadisticasPrincipales() {
-                if (!state.estadisticas?.resumenGeneral) return;
-
-                // Calcular métricas basadas en empleados activos visualizados
-                const activos = state.empleados.filter(e => e.activo).length;
-                document.getElementById('stat-total-empleados').textContent = activos;
-
-                let asist = 0, retrasoMin = 0, extraMin = 0;
-                const det = state.estadisticas.estadisticasDetalladas || [];
-
-                // Filtrar solo datos de empleados activos para los totales globales
-                const validos = det.filter(d => {
-                    const emp = state.empleados.find(e => e.idEmpleado === d.empleado?.idEmpleado);
-                    return emp && emp.activo;
-                });
-
-                if (validos.length > 0) {
-                    asist = validos.reduce((acc, cur) => acc + cur.porcentajeAsistencia, 0) / validos.length;
-                    retrasoMin = validos.reduce((acc, cur) => acc + (cur.totalMinutosRetraso || 0), 0);
-                    extraMin = validos.reduce((acc, cur) => acc + (cur.totalMinutosExtra || 0), 0);
-                }
-
-                document.getElementById('stat-asistencia').textContent = `${asist.toFixed(1)}%`;
-                document.getElementById('stat-retraso').textContent = `${(retrasoMin / 60).toFixed(1)}h`;
-                document.getElementById('stat-extra').textContent = `${(extraMin / 60).toFixed(1)}h`;
-            }
-
-            function actualizarVistaCompleta() {
-                actualizarEstadisticasPrincipales();
-                mostrarEstadisticas();
-                actualizarBotonesVista();
-            }
-
-            // --- RENDERIZADO VISUAL ACTUALIZADO (GLASS CARDS) ---
-            function mostrarEstadisticas() {
-                const container = document.getElementById('lista-estadisticas');
-                const data = state.estadisticasOriginales || state.estadisticas;
-
-                if (!data || !data.estadisticasDetalladas) {
-                    container.innerHTML = `<div class="col-12 text-center py-5 text-muted">Sin datos disponibles</div>`;
-                    return;
-                }
-
-                let lista = [...data.estadisticasDetalladas];
-
-                // Filtro Activo/Inactivo
-                lista = lista.filter(est => {
-                    const emp = state.empleados.find(e => e.idEmpleado === est.empleado?.idEmpleado);
-                    return emp ? (state.mostrarSoloActivos ? emp.activo : !emp.activo) : false;
-                });
-
-                // Ordenamiento por búsqueda
-                if (state.busquedaActual) {
-                    const txt = state.busquedaActual.toLowerCase();
-                    lista.sort((a, b) => {
-                        const scoreA = calcularScore(a, txt);
-                        const scoreB = calcularScore(b, txt);
-                        return scoreB - scoreA;
-                    });
-                }
-
-                if (lista.length === 0) {
-                    container.innerHTML = `<div class="col-12 text-center py-5 text-muted">No se encontraron empleados ${state.mostrarSoloActivos ? 'activos' : 'inactivos'} con los filtros actuales.</div>`;
-                    return;
-                }
-
-                container.innerHTML = lista.map(est => {
-                    const emp = state.empleados.find(e => e.idEmpleado === est.empleado?.idEmpleado);
-                    const nombre = resaltar(est.empleado?.nombre);
-                    const depto = resaltar(est.empleado?.departamento);
-
-                    // Colores dinámicos para barras
-                    const colorAsistencia = est.porcentajeAsistencia >= 90 ? 'bg-success' : est.porcentajeAsistencia >= 70 ? 'bg-warning' : 'bg-danger';
-                    const colorTextoAsistencia = est.porcentajeAsistencia >= 90 ? 'text-success' : est.porcentajeAsistencia >= 70 ? 'text-warning' : 'text-danger';
-
-                    return `
-                            <div class="col-md-6 col-lg-4">
-                                <div class="card card-estadistica h-100">
-                                    <div class="card-body">
-                                        <div class="d-flex align-items-center mb-3">
-                                            <img src="${est.empleado?.foto_url || `https://ui-avatars.com/api/?name=${encodeURIComponent(est.empleado?.nombre)}&background=random&color=fff`}"
-                                                 class="avatar rounded-circle me-3"
-                                                 onerror="this.src='https://ui-avatars.com/api/?name=NA&background=random'">
-                                            <div class="flex-grow-1 overflow-hidden">
-                                                <h6 class="mb-0 fw-bold text-white text-truncate">${nombre}</h6>
-                                                <small class="text-muted d-block">${depto || 'N/A'}</small>
-                                            </div>
-                                            <div class="text-end">
-                                                <h5 class="mb-0 fw-bold ${colorTextoAsistencia}">${est.porcentajeAsistencia}%</h5>
-                                                <small class="text-muted" style="font-size: 0.7rem;">ASISTENCIA</small>
-                                            </div>
-                                        </div>
-
-                                        <div class="progress mb-3">
-                                            <div class="progress-bar ${colorAsistencia}" style="width: ${est.porcentajeAsistencia}%"></div>
-                                        </div>
-
-                                        <div class="d-flex justify-content-between text-center pt-2 border-top border-secondary border-opacity-25">
-                                            <div>
-                                                <div class="fw-bold text-white">${est.diasTrabajados}/${est.totalDias}</div>
-                                                <small class="text-muted" style="font-size: 0.7rem;">DÍAS</small>
-                                            </div>
-                                            <div>
-                                                <div class="fw-bold text-warning">${Math.floor(est.totalMinutosRetraso / 60)}h</div>
-                                                <small class="text-muted" style="font-size: 0.7rem;">RETRASO</small>
-                                            </div>
-                                            <div>
-                                                <div class="fw-bold text-info">${Math.floor(est.totalMinutosExtra / 60)}h</div>
-                                                <small class="text-muted" style="font-size: 0.7rem;">EXTRA</small>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        `;
-                }).join('');
-            }
-
-            function calcularScore(est, txt) {
-                let pt = 0;
-                const n = (est.empleado?.nombre || '').toLowerCase();
-                const d = (est.empleado?.departamento || '').toLowerCase();
-                const c = (est.empleado?.codigo_empleado || '').toLowerCase();
-
-                if (n === txt) pt += 10;
-                else if (n.startsWith(txt)) pt += 5;
-                else if (n.includes(txt)) pt += 3;
-
-                if (d.includes(txt)) pt += 2;
-                if (c.includes(txt)) pt += 4;
-                return pt;
-            }
-
-            function resaltar(txt) {
-                if (!state.busquedaActual || !txt) return txt;
-                const re = new RegExp(`(${state.busquedaActual})`, 'gi');
-                return txt.toString().replace(re, '<span class="search-highlight">$1</span>');
-            }
-
-            // --- FILTROS & UI ---
-            async function cargarFiltros() {
-                try {
-                    actualizarProgresoCarga(1, "Cargando empleados...");
-                    state.empleados = await apiCall('/api/empleados?incluirInactivos=true');
-
-                    actualizarProgresoCarga(2, "Cargando departamentos...");
-                    state.departamentos = await apiCall('/api/departamentos?incluirInactivos=true');
-
-                    const sel = document.getElementById('filtro-departamento');
-                    sel.innerHTML = '<option value="">Todos</option>';
-                    state.departamentos.forEach(d => {
-                        sel.innerHTML += `<option value="${d.idDepartamento}">${d.nombre}</option>`;
-                    });
-                } catch (e) { }
-            }
-
-            function configurarBusquedaRapida() {
-                document.getElementById('busqueda-rapida').addEventListener('input', (e) => {
-                    state.busquedaActual = e.target.value.trim();
-                    mostrarEstadisticas();
-                });
-            }
-
-            function mostrarSoloActivos() { state.mostrarSoloActivos = true; actualizarVistaCompleta(); }
-            function mostrarSoloInactivos() { state.mostrarSoloActivos = false; actualizarVistaCompleta(); }
 
             function actualizarBotonesVista() {
                 const bA = document.getElementById('btn-activos');
                 const bI = document.getElementById('btn-inactivos');
+                if (!bA || !bI) return;
+
                 if (state.mostrarSoloActivos) {
                     bA.className = 'btn btn-primary btn-sm btn-vista-activa';
                     bI.className = 'btn btn-outline-secondary btn-sm';
@@ -712,63 +787,35 @@
                 }
             }
 
-            function aplicarFiltros() { cargarEstadisticas(true); }
-
-            function limpiarFiltros() {
-                configurarFechasPorDefecto();
-                document.getElementById('filtro-departamento').value = '';
-                document.getElementById('busqueda-rapida').value = '';
-                state.busquedaActual = '';
-                state.mostrarSoloActivos = true;
-                mostrarAlerta('Filtros restablecidos', 'info');
-                cargarEstadisticas(true);
-            }
-
-            function limpiarBusqueda() {
-                document.getElementById('busqueda-rapida').value = '';
-                state.busquedaActual = '';
-                mostrarEstadisticas();
-            }
-
-            function recargarEstadisticas() { cargarEstadisticas(true); }
-
-            function configurarFechasPorDefecto() {
-                const hoy = new Date();
-                const hace30 = new Date();
-                hace30.setDate(hoy.getDate() - 30);
-                document.getElementById('filtro-inicio').value = hace30.toISOString().split('T')[0];
-                document.getElementById('filtro-fin').value = hoy.toISOString().split('T')[0];
-            }
-
-            function mostrarAlerta(msg, type) {
-                const div = document.createElement('div');
-                div.className = `alert alert-${type} position-fixed top-0 start-50 translate-middle-x mt-3 z-3`;
-                div.innerHTML = `<i class="bi bi-info-circle me-2"></i>${msg}`;
-                document.body.appendChild(div);
-                setTimeout(() => div.remove(), 3000);
-            }
-
-            // INIT
-            async function init() {
-                if (!document.getElementById('estadisticas-container')) return;
-                mostrarPantallaCarga();
-                try {
-                    configurarFechasPorDefecto();
-                    await cargarFiltros();
-                    await cargarEstadisticas(false);
-                    configurarBusquedaRapida();
-                    actualizarBotonesVista();
-                } catch (e) { ocultarPantallaCarga(); }
-            }
-
+            // --- EXPOSE ---
             if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
             else init();
 
             return {
-                init, cargarEstadisticas, recargarEstadisticas, aplicarFiltros, limpiarFiltros,
-                limpiarBusqueda, mostrarSoloActivos, mostrarSoloInactivos
+                init,
+                recargarEstadisticas: () => ejecutarCargaEstadisticas(true),
+                aplicarFiltros: () => ejecutarCargaEstadisticas(false),
+                limpiarFiltros: () => {
+                    configurarFechasPorDefecto();
+                    const d = document.getElementById('filtro-departamento');
+                    if (d) d.value = '';
+                    const b = document.getElementById('busqueda-rapida');
+                    if (b) b.value = '';
+                    state.busquedaActual = '';
+                    ejecutarCargaEstadisticas(false);
+                },
+                limpiarBusqueda: () => {
+                    const b = document.getElementById('busqueda-rapida');
+                    if (b) b.value = '';
+                    state.busquedaActual = '';
+                    renderizarGridCards();
+                },
+                mostrarSoloActivos: () => { state.mostrarSoloActivos = true; actualizarVistaCompleta(); },
+                mostrarSoloInactivos: () => { state.mostrarSoloActivos = false; actualizarVistaCompleta(); }
             };
         })();
     </script>
+
+
 </body>
 </html>
