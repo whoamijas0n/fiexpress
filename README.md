@@ -942,5 +942,34 @@ void conectarWiFi() {
 }
 ```
 
+## Uso del Sistema
 
+**Login:** Accede a /login.html.
 
+* Credenciales por defecto: Deberás crear un usuario inicial directamente en BD o mediante el endpoint de registro si está habilitado.
+
+**Dashboard:** Visualiza estadísticas generales.
+
+**Gestión RFID:**
+
+* Ve a Configuración > Tarjetas RFID.
+
+* Activa el "Modo Captura" desde la web.
+
+* Pasa una tarjeta nueva por el lector ESP32.
+
+* Asigna la tarjeta capturada a un empleado existente.
+
+## API y Documentación
+
+El proyecto incluye Swagger para documentar y probar los endpoints. Una vez iniciada la aplicación, navega a:
+
+```Plaintext
+https://localhost:7071/swagger
+```
+## Licencia y Autor
+
+Este proyecto es propiedad de **NokyTech Team**.
+
+Distribuido bajo la licencia **GNU General Public License v3.0**.  
+Consulta el archivo `LICENSE` para más detalles.
