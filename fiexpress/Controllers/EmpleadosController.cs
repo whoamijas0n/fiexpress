@@ -350,14 +350,20 @@ namespace fiexpress.Controllers
             }
         }
 
-        // PUT: api/empleados/{id}/desactivar (MEJORADO)
+        // PUT: api/empleados/{id}/desactivar
         [HttpPut("{id:int}/desactivar")]
         [Authorize(Roles = "Admin,Supervisor")]
         public async Task<IActionResult> DesactivarEmpleado(int id)
         {
             try
             {
-                var empleado = await _context.Empleados.FindAsync(id);
+                // 1. Cargamos el empleado CON sus relaciones clave usando Include
+                var empleado = await _context.Empleados
+                    .Include(e => e.Usuario)    // Traer usuario asociado
+                    .Include(e => e.Rfids)      // Traer tarjetas RFID
+                    .Include(e => e.Horarios)   // Traer horarios
+                    .FirstOrDefaultAsync(e => e.idEmpleado == id);
+
                 if (empleado == null)
                 {
                     return NotFound(new { mensaje = "Empleado no encontrado" });
@@ -365,40 +371,78 @@ namespace fiexpress.Controllers
 
                 if (!empleado.activo)
                 {
-                    return Ok(new { mensaje = "El empleado ya está inactivo" }); // ✅ Cambiado a 200 OK
+                    return Ok(new { mensaje = "El empleado ya está inactivo" });
                 }
 
+                // 2. Desactivar Empleado
                 empleado.activo = false;
                 empleado.fecha_baja = DateOnly.FromDateTime(DateTime.Now);
 
+                // 3. Desactivar Usuario (si tiene)
+                if (empleado.Usuario != null && empleado.Usuario.activo)
+                {
+                    empleado.Usuario.activo = false;
+                    _logger.LogInformation($"Usuario desactivado para empleado {id}");
+                }
+
+                // 4. Desactivar Tarjetas RFID activas
+                var rfidsActivos = empleado.Rfids.Where(r => r.activo).ToList();
+                foreach (var rfid in rfidsActivos)
+                {
+                    rfid.activo = false;
+                }
+
+                // 5. Desactivar Horarios activos
+                // (Opcional: Si quieres mantener el histórico tal cual, puedes cerrar la fecha_fin en lugar de poner activo=false, 
+                // pero para consistencia rápida, desactivamos el flag).
+                var horariosActivos = empleado.Horarios.Where(h => h.activo).ToList();
+                foreach (var horario in horariosActivos)
+                {
+                    horario.activo = false;
+                    // Opcional: Cerrar la fecha fin a hoy
+                    // horario.fecha_fin = DateOnly.FromDateTime(DateTime.Now); 
+                }
+
+                // 6. Guardar todos los cambios en una sola transacción
                 await _context.SaveChangesAsync();
 
-                // ✅ AUDITORÍA MEJORADA - Manejo más robusto
+                // 7. Auditoría
                 try
                 {
                     var userId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
                     if (int.TryParse(userId, out int usuarioId))
                     {
+                        var descripcion = $"Empleado desactivado: {empleado.nombre}. " +
+                                          $"Cascada: Usuario, {rfidsActivos.Count} RFIDs, {horariosActivos.Count} Horarios.";
+
                         var auditoria = new Auditoria
                         {
                             idAuditoriaUsuario = usuarioId,
-                            accion = "DESACTIVAR_EMPLEADO",
+                            accion = "DESACTIVAR_EMPLEADO_CASCADE", // Nueva acción para diferenciar
                             entidad_afectada = "Empleado",
                             fecha_accion = DateTime.Now,
                             ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown",
-                            descripcion = $"Empleado desactivado: {empleado.nombre} ({empleado.codigo_empleado})"
+                            descripcion = descripcion
                         };
                         _context.Auditorias.Add(auditoria);
-                        await _context.SaveChangesAsync(); // ✅ Segundo SaveChanges solo para auditoría
+                        await _context.SaveChangesAsync();
                     }
                 }
                 catch (Exception auditEx)
                 {
-                    _logger.LogWarning(auditEx, "Advertencia: No se pudo registrar auditoría, pero el empleado fue desactivado");
-                    // ✅ NO relanzamos la excepción - la operación principal fue exitosa
+                    _logger.LogWarning(auditEx, "Advertencia: No se pudo registrar auditoría");
                 }
 
-                return Ok(new { mensaje = "Empleado desactivado exitosamente" });
+                return Ok(new
+                {
+                    mensaje = "Empleado y sus accesos desactivados exitosamente",
+                    detalles = new
+                    {
+                        usuarioDesactivado = (empleado.Usuario != null),
+                        rfidsDesactivados = rfidsActivos.Count,
+                        horariosCerrados = horariosActivos.Count
+                    }
+                });
             }
             catch (Exception ex)
             {
