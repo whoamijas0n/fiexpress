@@ -449,8 +449,15 @@
                 let info = "Hoy";
                 const fecha = document.getElementById('filtro-fecha').value;
                 if (fecha) {
-                    const fObj = new Date(fecha);
+                    // ===== CORRECCIÓN AQUÍ =====
+                    // Dividimos "2025-12-05" en partes para crear la fecha localmente
+                    // new Date(año, mes (0-indexado), día)
+                    const [year, month, day] = fecha.split('-');
+                    const fObj = new Date(year, month - 1, day);
+                    // ===========================
+
                     const hoy = new Date();
+                    // Comparamos cadenas de fecha para evitar problemas de hora
                     if (fObj.toDateString() !== hoy.toDateString()) {
                         info = fObj.toLocaleDateString('es-ES', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
                     }
