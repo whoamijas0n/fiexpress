@@ -10,7 +10,6 @@ wwwroot\panel-empleado.html
 wwwroot\views\configuracion.html
 wwwroot\views\empleados.html
 wwwroot\views\estadisticas-personales.html
-wwwroot\views\estadisticas.html
 wwwroot\views\fichajes.html
 wwwroot\views\horarios.html
 wwwroot\views\inicio-empleado.html
@@ -22,3 +21,4 @@ wwwroot\views\permisos-empleado.html
 wwwroot\views\permisos.html
 wwwroot\views\rfid.html
 wwwroot\views\usuarios.html
+wwwroot\views\estadisticas.html
